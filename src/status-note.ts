@@ -10,6 +10,11 @@
 
 import type { AgentRecord } from "./types.js";
 
+/** Whether an agent record can still be stopped (running or queued). */
+export function isStoppableStatus(status: string): boolean {
+  return status === "running" || status === "queued";
+}
+
 /**
  * Explicit parenthetical note for a non-normal terminal outcome, so the parent
  * agent can't mistake partial output for a completed result. Empty string for a

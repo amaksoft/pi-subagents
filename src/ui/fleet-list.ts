@@ -3,7 +3,8 @@
  *
  * Shows `main` + each running/queued subagent as a navigable list. Pressing ↓ (or
  * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ● marker),
- * Enter opens the selected agent's live conversation overlay, Esc returns to the prompt.
+ * Enter opens the selected agent's live conversation overlay, `x` (twice to
+ * confirm) stops the selected agent, Esc returns to the prompt.
  * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
@@ -14,6 +15,7 @@
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import { isStoppableStatus } from "../status-note.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
@@ -111,6 +113,8 @@ export class FleetList {
   /** Set while a conversation overlay is open; calling it closes the overlay. */
   private viewerClose: (() => void) | undefined;
   private viewingAgentId: string | undefined;
+  /** Agent id armed for a two-press `x` stop; any other key disarms. */
+  private stopArmedFor: string | null = null;
   /** Injected by the extension; absent until workflows are wired (or at all). */
   private workflowSource: (() => readonly FleetWorkflow[]) | undefined;
   private openWorkflow: ((id: string) => Promise<void> | void) | undefined;
@@ -152,6 +156,7 @@ export class FleetList {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
     if (!enabled) this.active = false;
+    this.disarmStop();
     this.update();
   }
 
@@ -191,6 +196,7 @@ export class FleetList {
     this.widgetRegistered = false;
     this.tui = undefined;
     this.active = false;
+    this.disarmStop();
     // Null last so a `viewerClose()` microtask above can't re-register the widget.
     this.ui = undefined;
   }
@@ -246,10 +252,15 @@ export class FleetList {
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => isTopLevelAgent(a) && a.session && (
-        a.status === "running" || a.status === "queued"
-        || a.id === this.viewingAgentId
-        || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
+      // Session-less rows (queued, or running before the first session) are
+      // listed while stoppable so quick-stop can reach them; opening a row
+      // still needs a session, and finished rows linger only with one to view.
+      .filter(a => isTopLevelAgent(a) && (
+        isStoppableStatus(a.status)
+        || (a.session && (
+          a.id === this.viewingAgentId
+          || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
+        ))
       ))
       .sort((a, b) => a.startedAt - b.startedAt);
   }
@@ -339,21 +350,60 @@ export class FleetList {
       return undefined;
     }
 
-    // Active — arrows navigate, Enter opens, Esc / Up-past-top exits.
+    // Active — arrows navigate, Enter opens, x stops, Esc / Up-past-top exits.
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
       this.selectedIndex = Math.min(max, this.selectedIndex + 1);
+      this.disarmStop();
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "up")) {
       if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
       this.selectedIndex -= 1;
+      this.disarmStop();
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
-    if (matchesKey(data, Key.enter)) { this.openSelected(); return { consume: true }; }
+    if (matchesKey(data, Key.enter)) { this.disarmStop(); this.openSelected(); return { consume: true }; }
+    // Stop the selected agent without opening its viewer. Two-press, like the
+    // viewer's own `x`: first arms, second confirms — any other key disarms.
+    // Only consumed on a stoppable row; everywhere else `x` is typed text.
+    if (matchesKey(data, "x")) {
+      const rosterList = this.roster();
+      const record = this.stoppableRecord(rosterList[this.selectedIndex]);
+      // A pending arm belongs to a specific agent, not to the row index: the
+      // roster shifts as agents settle, so confirm only when the selected row
+      // is still the armed one.
+      if (this.stopArmedFor) {
+        const armed = rosterList.find(e => e.kind === "agent" && e.record.id === this.stopArmedFor);
+        if (record && this.stoppableRecord(armed) && record.id === this.stopArmedFor) {
+          this.disarmStop();
+          if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
+        } else if (armed && !this.stoppableRecord(armed)) {
+          // Still listed but settled while armed — report instead of going
+          // silent, then disarm. A row with a session can still be opened.
+          this.disarmStop();
+          this.ui?.notify(
+            armed.kind === "agent" && armed.record.session
+              ? "Agent already finished — nothing to stop. Press Enter on its row to read what it produced."
+              : "Agent already finished — nothing to stop.",
+            "info",
+          );
+        } else {
+          // Selection moved on, or the row is gone: disarm, never retarget.
+          this.disarmStop();
+        }
+        this.update();
+        return { consume: true };
+      }
+      if (record) {
+        this.stopArmedFor = record.id;
+        this.update();
+        return { consume: true };
+      }
+    }
 
     // Any other key cancels navigation and flows to the editor.
     this.deactivate();
@@ -376,7 +426,20 @@ export class FleetList {
   private deactivate(): void {
     this.active = false;
     this.selectedIndex = 0;
+    this.disarmStop();
     this.update();
+  }
+
+  /** The record behind a roster entry when it can still be stopped, else undefined. */
+  private stoppableRecord(entry: FleetEntry | undefined): AgentRecord | undefined {
+    return entry && entry.kind === "agent" && isStoppableStatus(entry.record.status)
+      ? entry.record
+      : undefined;
+  }
+
+  /** Clear a pending two-press stop. Called on every path that leaves the confirm. */
+  private disarmStop(): void {
+    this.stopArmedFor = null;
   }
 
   private openSelected(): void {
@@ -452,23 +515,31 @@ export class FleetList {
     this.viewerClose = undefined;
     this.viewingAgentId = undefined;
     this.viewingWorkflowId = undefined;
+    this.disarmStop();
     this.update();
   }
 
   // ---- Rendering ----
 
   private renderBar(width: number, theme: Theme): string[] {
-    const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry)[];
+    const rosterList = this.roster();
+    const rows = rosterList.slice(1) as (WorkflowEntry | AgentEntry)[];
     if (rows.length === 0) return [];
     // Clamp locally so a render between a roster shrink and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
     const sel = Math.min(this.selectedIndex, rows.length);
 
+    // The armed hint is qualified by stoppability (a row that settles while
+    // armed keeps its id in the roster through the linger window, but the key
+    // no longer performs a stop there — the x handler reports that instead).
+    // The `x stop` affordance itself only shows while some row is stoppable.
+    const armed = this.stopArmedFor != null && this.stoppableRecord(rosterList.find(e => e.kind === "agent" && e.record.id === this.stopArmedFor)) !== undefined;
+    const anyStoppable = rosterList.some(e => this.stoppableRecord(e) !== undefined);
     const hint = this.active
-      ? "↑↓ select · enter view · esc back"
-      : "esc to interrupt · ← for agents · ↓ to manage";
+      ? "↑↓ select · enter view · " + (armed ? theme.fg("error", "x again to STOP") + theme.fg("dim", " · esc back") : theme.fg("dim", (anyStoppable ? "x stop · " : "") + "esc back"))
+      : theme.fg("dim", "esc to interrupt · ← for agents · ↓ to manage");
     const lines: string[] = [];
-    lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
+    lines.push(truncateToWidth("  " + hint, width));
     lines.push("");
     lines.push(truncateToWidth(`  ${this.bullet(0, sel, theme)} main`, width));
 

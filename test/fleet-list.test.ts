@@ -439,14 +439,16 @@ describe("FleetList rendering", () => {
     expect(oldIdx).toBeLessThan(newIdx); // earliest sits above the later one
   });
 
-  it("hides agents that have no session yet (pending)", () => {
+  it("lists queued agents that have no session yet (stoppable, but not openable)", () => {
     const agents = [
       makeRecord({ id: "live", description: "running one" }),
       makeRecord({ id: "pending", description: "queued one", status: "queued", session: undefined }),
     ];
     const lines = harness(agents).render();
     expect(lines.some(l => l.includes("running one"))).toBe(true);
-    expect(lines.some(l => l.includes("queued one"))).toBe(false);
+    // Session-less but stoppable rows are listed so quick-stop can reach
+    // them; opening one still needs a session (see the session-less tests).
+    expect(lines.some(l => l.includes("queued one"))).toBe(true);
   });
 
   it("collapses overflow into a '↓ N more' indicator", () => {
@@ -807,5 +809,210 @@ describe("FleetList workflow rows", () => {
     h.setWorkflows([makeWorkflow({ status: "completed", startedAt: completedAt - 12_000, completedAt })]);
 
     expect(h.render().map(plain).join("\n")).toContain("12s");
+  });
+});
+
+describe("FleetList quick stop (x)", () => {
+  function armedHarness(record?: AgentRecord) {
+    const h = harness([record ?? makeRecord({ id: "a1", description: "sleepy" })]);
+    const abort = vi.fn(() => true);
+    (h.manager as any).abort = abort;
+    h.press(DOWN); // activate → main
+    h.press(DOWN); // select the agent row
+    return { h, abort };
+  }
+
+  it("first x arms, second x stops — abort fires exactly once", () => {
+    const { h, abort } = armedHarness();
+    expect(h.press("x")).toEqual({ consume: true });
+    expect(abort).not.toHaveBeenCalled();
+    expect(h.render().map(plain).join("\n")).toContain("x again to STOP");
+
+    expect(h.press("x")).toEqual({ consume: true });
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith("a1");
+  });
+
+  it("any other key disarms instead of stopping", () => {
+    const { h, abort } = armedHarness();
+    h.press("x");
+    h.press(DOWN); // navigate away — disarms (and clamps at the last row)
+    expect(abort).not.toHaveBeenCalled();
+    expect(h.render().map(plain).join("\n")).not.toContain("x again to STOP");
+  });
+
+  it("x on a finished agent is left alone (not consumed as a stop)", () => {
+    const { h, abort } = armedHarness(makeRecord({ id: "a9", status: "completed" }));
+    // Finished rows linger in the list but are not stoppable: x must not arm.
+    h.press("x");
+    expect(abort).not.toHaveBeenCalled();
+    expect(h.render().map(plain).join("\n")).not.toContain("x again to STOP");
+  });
+
+  it("x on main flows through to the editor (typing is preserved)", () => {
+    const h = harness([makeRecord()]);
+    h.press(DOWN); // activate → selection on main
+    expect(h.press("x")).toBeUndefined();
+  });
+});
+
+describe("FleetList quick stop (x) — arm lifecycle", () => {
+  it("an agent that finishes while armed reports it instead of misfiring", () => {
+    const record = makeRecord({ id: "a1", description: "sleepy" });
+    const h = harness([record]);
+    const abort = vi.fn(() => true);
+    (h.manager as any).abort = abort;
+    const notices: string[] = [];
+    (h.ui as any).notify = (msg: string) => { notices.push(msg); };
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press("x"); // arm
+    expect(h.render().map(plain).join("\n")).toContain("x again to STOP");
+
+    // The agent settles while the arm is pending: the hint must not offer a
+    // stop the key won't perform...
+    record.status = "completed";
+    record.completedAt = Date.now();
+    h.fleet.update();
+    expect(h.render().map(plain).join("\n")).not.toContain("x again to STOP");
+
+    // ...and the pending confirm reports the finish instead of stopping a
+    // stranger or going silent — with an opener pointer when viewable.
+    expect(h.press("x")).toEqual({ consume: true });
+    expect(abort).not.toHaveBeenCalled();
+    expect(notices).toEqual(["Agent already finished — nothing to stop. Press Enter on its row to read what it produced."]);
+
+    // Arm spent: a further x flows through to the editor.
+    expect(h.press("x")).toBeUndefined();
+  });
+
+  it("x-then-Esc disarms without stopping", () => {
+    const h = harness([makeRecord({ id: "a1", description: "sleepy" })]);
+    const abort = vi.fn(() => true);
+    (h.manager as any).abort = abort;
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press("x"); // arm
+    expect(h.press(ESC)).toEqual({ consume: true });
+    expect(abort).not.toHaveBeenCalled();
+    expect(h.render().map(plain).join("\n")).not.toContain("x again to STOP");
+  });
+
+  it("x on a workflow row flows through (workflows stop from their own dialog)", () => {
+    const h = harness([]);
+    h.setWorkflows([makeWorkflow({ id: "wf_1", name: "audit" })]);
+    h.press(DOWN); // activate → main
+    h.press(DOWN); // select the workflow row
+    expect(h.press("x")).toBeUndefined();
+  });
+});
+
+describe("FleetList quick stop (x) — confirm safety", () => {
+  it("a roster shift between arm and confirm disarms instead of retargeting", () => {
+    const one = makeRecord({ id: "a1", description: "one" });
+    const two = makeRecord({ id: "a2", description: "two" });
+    const h = harness([one, two]);
+    const abort = vi.fn(() => true);
+    (h.manager as any).abort = abort;
+    h.press(DOWN);
+    h.press(DOWN); // a1
+    h.press("x");  // arm a1
+    // a1 settles and ages out of the linger window: the roster drops it, the
+    // selection index now addresses a2, while the arm still names a1.
+    one.status = "completed";
+    one.completedAt = Date.now() - 5000;
+    h.fleet.update();
+
+    expect(h.press("x")).toEqual({ consume: true });
+    expect(abort).not.toHaveBeenCalled();
+  });
+
+  it("hides the x affordance when no row is stoppable", () => {
+    const h = harness([makeRecord({ id: "a9", status: "completed", completedAt: Date.now() })]);
+    h.press(DOWN); // activate
+    const text = h.render().map(plain).join("\n");
+    expect(text).toContain("esc back");
+    expect(text).not.toContain("x stop");
+  });
+
+  it("disabling the list disarms a pending stop", () => {
+    const h = harness([makeRecord({ id: "a1", description: "sleepy" })]);
+    const abort = vi.fn(() => true);
+    (h.manager as any).abort = abort;
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press("x"); // arm
+    h.fleet.setEnabled(false);
+    h.fleet.setEnabled(true);
+    h.press(DOWN);
+    h.press(DOWN);
+    // Arm was cleared: this x re-arms rather than confirming, so no abort.
+    expect(h.press("x")).toEqual({ consume: true });
+    expect(abort).not.toHaveBeenCalled();
+    expect(h.render().map(plain).join("\n")).toContain("x again to STOP");
+  });
+
+  it("ignores key-release events for x (one tap cannot arm-then-confirm)", () => {
+    const h = harness([makeRecord({ id: "a1", description: "sleepy" })]);
+    const abort = vi.fn(() => true);
+    (h.manager as any).abort = abort;
+    h.press(DOWN);
+    h.press(DOWN);
+    // Kitty release half of an x tap — must be a no-op like DOWN_RELEASE is.
+    expect(h.press("\x1b[120;1:3u")).toBeUndefined();
+    expect(h.render().map(plain).join("\n")).not.toContain("x again to STOP");
+    expect(abort).not.toHaveBeenCalled();
+  });
+});
+
+describe("FleetList quick stop (x) — abort edge", () => {
+  it("a confirm that loses the race stays silent (abort already false)", () => {
+    // abort() returning false here is unreachable in production (single
+    // thread, no await between check and call) — pin the silent-disarm
+    // behavior so a future refactor keeps it quiet rather than notifying
+    // success it did not perform.
+    const h = harness([makeRecord({ id: "a1", description: "sleepy" })]);
+    const abort = vi.fn(() => false);
+    (h.manager as any).abort = abort;
+    const notices: string[] = [];
+    (h.ui as any).notify = (msg: string) => { notices.push(msg); };
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press("x"); // arm
+    expect(h.press("x")).toEqual({ consume: true });
+    expect(abort).toHaveBeenCalledWith("a1");
+    expect(notices).toEqual([]);
+  });
+});
+
+describe("FleetList session-less rows", () => {
+  it("lists queued and pre-session running agents so x can reach them", () => {
+    const queued = makeRecord({ id: "q1", description: "queued one", status: "queued", session: undefined });
+    const starting = makeRecord({ id: "s1", description: "starting one", status: "running", session: undefined });
+    const h = harness([queued, starting]);
+    const abort = vi.fn(() => true);
+    (h.manager as any).abort = abort;
+
+    const text = h.render().map(plain).join("\n");
+    expect(text).toContain("queued one");
+    expect(text).toContain("starting one");
+
+    // Quick-stop works by id without a session...
+    h.press(DOWN);
+    h.press(DOWN); // q1
+    h.press("x");
+    expect(h.press("x")).toEqual({ consume: true });
+    expect(abort).toHaveBeenCalledWith("q1");
+  });
+
+  it("opening a session-less row explains itself instead of crashing", () => {
+    const queued = makeRecord({ id: "q1", description: "queued one", status: "queued", session: undefined });
+    const h = harness([queued]);
+    const notices: string[] = [];
+    (h.ui as any).notify = (msg: string) => { notices.push(msg); };
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press(ENTER);
+    expect(notices.some(m => m.includes("no session"))).toBe(true);
   });
 });

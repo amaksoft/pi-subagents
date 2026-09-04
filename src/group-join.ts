@@ -10,6 +10,19 @@ import type { AgentRecord } from "./types.js";
 
 export type DeliveryCallback = (records: AgentRecord[], partial: boolean) => void;
 
+/**
+ * Envelope label for a grouped completion notification. Status-aware: a group
+ * whose members did not all complete says so, instead of a blanket "finished".
+ */
+export function groupCompletionLabel(unconsumed: Pick<AgentRecord, "status">[], partial: boolean): string {
+  const incomplete = unconsumed.filter(r => r.status !== "completed").length;
+  if (partial) return `${unconsumed.length} agent(s) finished (partial — others still running)`;
+  const stopped = unconsumed.filter(r => r.status === "stopped").length;
+  if (incomplete > 0 && stopped === incomplete) return `${unconsumed.length} agent(s) finished (${stopped} stopped)`;
+  if (incomplete > 0) return `${unconsumed.length} agent(s) finished (partial — ${incomplete} did not complete)`;
+  return `${unconsumed.length} agent(s) finished`;
+}
+
 interface AgentGroup {
   groupId: string;
   agentIds: Set<string>;

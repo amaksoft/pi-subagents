@@ -5,6 +5,7 @@
  *   Agent             — LLM-callable: spawn a sub-agent
  *   get_subagent_result  — LLM-callable: check background agent status/result
  *   steer_subagent       — LLM-callable: send a steering message to a running agent
+ *   stop_subagent        — LLM-callable: stop a running or queued agent
  *
  * Commands:
  *   /agents                 — Interactive agent management menu
@@ -18,13 +19,13 @@ import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
-import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
+import { AgentManager, isTopLevelAgent, topLevelStopRefusal } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { GroupJoinManager } from "./group-join.js";
+import { GroupJoinManager, groupCompletionLabel } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
@@ -504,9 +505,7 @@ export default function (pi: ExtensionAPI) {
         if (unconsumed.length === 0) { widget.update(); return; }
 
         const notifications = unconsumed.map(r => formatTaskNotification(r, 300, showCost)).join('\n\n');
-        const label = partial
-          ? `${unconsumed.length} agent(s) finished (partial — others still running)`
-          : `${unconsumed.length} agent(s) finished`;
+        const label = groupCompletionLabel(unconsumed, partial);
 
         const [first, ...rest] = unconsumed;
         const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
@@ -644,6 +643,13 @@ export default function (pi: ExtensionAPI) {
     // see `PendingUsagePool`. Skipped entirely when the feature is off, so no
     // pool grows in a session that will never drain it.
     if (reportUsage) pendingUsage.add(usage);
+  }, (record) => {
+    // Every stop lands here exactly once — model tool, nested tool, FleetView
+    // key, /agents menu, RPC, or abortAll — queued stops included, which never
+    // reach onComplete. Running stops additionally surface as subagents:failed
+    // at settle (status=stopped); that pre-existing mapping is unchanged.
+    if (!isTopLevelAgent(record)) return;
+    pi.events.emit("subagents:stopped", buildEventData(record));
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -1482,7 +1488,7 @@ Notes:
 - Parallel work: one message, multiple Agent calls — they run concurrently.
 - Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
-- resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
+- resume continues a previous agent by ID; steer_subagent messages a running one; stop_subagent stops a stuck or unneeded one.${isolationCompactGuideline}`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -1507,7 +1513,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - **Foreground vs background**: Pass \`run_in_background: false\` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result "next" is not enough on its own.
 - **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
-- Use steer_subagent to send mid-run messages to a running background agent.
+- Use steer_subagent to send mid-run messages to a running background agent, or stop_subagent to stop a stuck or unneeded one.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
@@ -1599,7 +1605,7 @@ Terse command-style prompts produce shallow, generic work.
       name: Type.Optional(
         Type.String({
           description:
-            'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.',
+            'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `@name` at the prompt and by steer_subagent / stop_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.',
         }),
       ),
       subagent_type: Type.String({
@@ -1629,7 +1635,7 @@ Terse command-style prompts produce shallow, generic work.
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to message it mid-run, or stop_subagent to stop it.",
         }),
       ),
       isolated: Type.Optional(
@@ -2012,7 +2018,7 @@ Terse command-style prompts produce shallow, generic work.
             (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
             (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
             `\nYou will be notified when this agent completes.\n` +
-            `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.`,
+            `Use get_subagent_result to retrieve full results, steer_subagent to send it messages, or stop_subagent to stop it.`,
             { ...detailBaseFor(record), toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
           );
         }
@@ -2127,7 +2133,7 @@ Terse command-style prompts produce shallow, generic work.
           (record?.outputFile ? `Output file: ${record.outputFile}\n` : "") +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
           `\nYou will be notified when this agent completes.\n` +
-          `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
+          `Use get_subagent_result to retrieve full results, steer_subagent to send it messages, or stop_subagent to stop it.\n` +
           `Do not duplicate this agent's work.`,
           { ...detailBaseFor(record), toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
         );
@@ -2880,6 +2886,47 @@ Terse command-style prompts produce shallow, generic work.
       } catch (err) {
         return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
       }
+    },
+  }));
+
+  // ---- stop_subagent tool ----
+
+  registerToolReportingUsage(defineTool({
+    name: SUBAGENT_TOOL_NAMES.STOP,
+    label: "Stop Agent",
+    description:
+      "Stop a running or queued top-level agent — the kill switch for stuck, looping, or no-longer-needed agents that steering cannot redirect. " +
+      "The agent aborts immediately and a subagents:stopped event fires; check FleetView or get_subagent_result for status. " +
+      "A run that started keeps partial output (read it with get_subagent_result); a stopped run can be resumed or re-spawned. " +
+      "Nested children belong to their owner — this tool refuses them.",
+    promptSnippet: "Stop a stuck or no-longer-needed subagent",
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "The agent ID to stop (must be currently running or queued). The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+      }),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      const record = resolveAgentRef(params.agent_id);
+      const refusal = topLevelStopRefusal(record, params.agent_id);
+      if (refusal) return textResult(refusal);
+      // Refusal covers every non-stoppable shape, so below the record is a
+      // live, top-level, running-or-queued agent.
+      const live = record as AgentRecord;
+      // Read for the messages below: abort() mutates record.status to
+      // "stopped", so anything after it must not re-read the field.
+      const status = live.status;
+      // No session and no promise means the run never produced anything —
+      // queued, or stopped mid-startup before the session existed.
+      const neverStarted = status === "queued" || (!live.session && !live.promise);
+      if (!manager.abort(live.id)) {
+        return textResult(`Agent "${params.agent_id}" could not be stopped (status was: ${status}). Use get_subagent_result to read what it produced.`);
+      }
+      return textResult(
+        `Stopped agent ${live.id} (${live.description}). ` +
+        (neverStarted
+          ? `It never started, so there is no partial output.`
+          : `Its partial output is flagged as incomplete, not as a completion — use get_subagent_result to read what it produced.`),
+      );
     },
   }));
 

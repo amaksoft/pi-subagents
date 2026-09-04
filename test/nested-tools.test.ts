@@ -80,6 +80,12 @@ beforeEach(() => {
     spawnAndWait,
     awaitStartup: vi.fn(async () => {}),
     getRecord: (id: string) => records.get(id),
+    abort: vi.fn((id: string) => {
+      const record = records.get(id);
+      if (!record || (record.status !== "running" && record.status !== "queued")) return false;
+      record.status = "stopped";
+      return true;
+    }),
     resume: vi.fn(),
   } as any;
 });
@@ -561,5 +567,98 @@ describe("setMaxSubagentDepth clamping", () => {
   it("stores a valid depth unchanged", () => {
     setMaxSubagentDepth(3);
     expect(getMaxSubagentDepth()).toBe(3);
+  });
+});
+
+describe("nested stop_subagent", () => {
+  function ownedChild(over: Record<string, unknown> = {}) {
+    const record: Record<string, unknown> = {
+      id: `child-${records.size + 1}`,
+      status: "running",
+      parentAgentId: "parent-1",
+      ...over,
+    };
+    records.set(record.id as string, record);
+    return record;
+  }
+
+  it("stops an owned running child and points at its partial output", async () => {
+    const [, , , stop] = tools();
+    const record = ownedChild();
+
+    const result = await execute(stop, { agent_id: record.id });
+
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toContain("Stopped");
+    expect(result.content[0].text).toContain("get_subagent_result");
+    expect(record.status).toBe("stopped");
+  });
+
+  it("stops an owned queued child", async () => {
+    const [, , , stop] = tools();
+    const record = ownedChild({ status: "queued" });
+
+    const result = await execute(stop, { agent_id: record.id });
+
+    expect(result.isError).toBe(false);
+    expect(record.status).toBe("stopped");
+  });
+
+  it("refuses a child owned by another parent", async () => {
+    const [, , , stop] = tools();
+    const record = ownedChild({ parentAgentId: "parent-2" });
+
+    const result = await execute(stop, { agent_id: record.id });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("not owned by this parent");
+    expect(record.status).toBe("running");
+  });
+
+  it("refuses a finished child with nothing to stop", async () => {
+    const [, , , stop] = tools();
+    const record = ownedChild({ status: "completed" });
+
+    const result = await execute(stop, { agent_id: record.id });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Nothing to stop");
+    expect(result.content[0].text).toContain("get_subagent_result");
+    expect(record.status).toBe("completed");
+  });
+
+  it("refuses every other settled status with its name in the message", async () => {
+    const [, , , stop] = tools();
+    for (const status of ["error", "aborted", "stopped", "steered"]) {
+      const record = ownedChild({ status });
+      const result = await execute(stop, { agent_id: record.id });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(`status: ${status}`);
+      expect(record.status).toBe(status);
+    }
+  });
+
+  it("reports an unknown id instead of throwing", async () => {
+    const [, , , stop] = tools();
+
+    const result = await execute(stop, { agent_id: "no-such-child" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("not found");
+  });
+
+  it("degrades gracefully when the parent runtime has no abort", async () => {
+    const [, , , stop] = tools();
+    const record = ownedChild();
+    const abort = (manager as any).abort;
+    delete (manager as any).abort;
+    try {
+      const result = await execute(stop, { agent_id: record.id });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("not available");
+      expect(record.status).toBe("running");
+    } finally {
+      (manager as any).abort = abort;
+    }
   });
 });

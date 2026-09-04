@@ -22,6 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
+import { isStoppableStatus } from "./status-note.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
@@ -29,6 +30,8 @@ import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorkt
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
+/** Fired exactly once per successful abort(), queued or running. */
+export type OnAgentStop = (record: AgentRecord) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
 /**
  * Fired once per assistant `message_end`, for EVERY agent this manager owns —
@@ -123,6 +126,22 @@ export function isTopLevelAgent(
   record: Pick<AgentRecord, "parentAgentId" | "workflowId">,
 ): boolean {
   return record.parentAgentId === undefined && record.workflowId === undefined;
+}
+
+/**
+ * Eligibility message for a top-level stop call. Returns the refusal text, or
+ * undefined when the record exists, is top-level, and is still stoppable.
+ * Pure so the ownership boundary is pinned without a live session.
+ */
+export function topLevelStopRefusal(record: AgentRecord | undefined, id: string): string | undefined {
+  if (!record) return `Agent not found: "${id}". It may have been cleaned up.`;
+  if (!isTopLevelAgent(record)) {
+    return `Agent "${id}" is not a top-level agent. Only the agent that spawned it can reach it — stop or steer the owning parent (stopping the parent stops all its children).`;
+  }
+  if (!isStoppableStatus(record.status)) {
+    return `Agent "${id}" is not running (status: ${record.status}). Nothing to stop. Use get_subagent_result to read its output.`;
+  }
+  return undefined;
 }
 
 /**
@@ -365,6 +384,7 @@ export class AgentManager {
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
+  private onStop?: OnAgentStop;
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
   private maxConcurrent: number;
@@ -418,11 +438,13 @@ export class AgentManager {
     onStart?: OnAgentStart,
     onCompact?: OnAgentCompact,
     onUsage?: OnAgentUsage,
+    onStop?: OnAgentStop,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
     this.onCompact = onCompact;
     this.onUsage = onUsage;
+    this.onStop = onStop;
     this.maxConcurrent = maxConcurrent;
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
@@ -600,6 +622,7 @@ export class AgentManager {
         record.status = "stopped";
         record.completedAt = Date.now();
         record.pendingSteers = undefined;
+        this.onStop?.(record);
       }
       return false;
     }
@@ -1479,6 +1502,7 @@ export class AgentManager {
       // but drop the queue anyway so a late session creation cannot flush
       // guidance into an agent that was stopped before it started.
       record.pendingSteers = undefined;
+      this.onStop?.(record);
       return true;
     }
 
@@ -1490,6 +1514,7 @@ export class AgentManager {
     // meaningless, and without this a session created after the stop would
     // still flush queued steers into it via onSessionCreated.
     record.pendingSteers = undefined;
+    this.onStop?.(record);
     return true;
   }
 
@@ -1580,26 +1605,14 @@ export class AgentManager {
 
   /** Abort all running and queued agents immediately. */
   abortAll(): number {
+    // Route through abort() so every stop shares one state machine (status,
+    // pending steers, stop event): collect ids first, abort() mutates the queue.
+    const ids = [
+      ...this.queue.map(q => q.id),
+      ...[...this.agents.values()].filter(r => r.status === "running").map(r => r.id),
+    ];
     let count = 0;
-    // Clear queued agents first
-    for (const queued of this.queue) {
-      const record = this.agents.get(queued.id);
-      if (record) {
-        record.status = "stopped";
-        record.completedAt = Date.now();
-        count++;
-      }
-    }
-    this.dequeue(() => true);
-    // Abort running agents
-    for (const record of this.agents.values()) {
-      if (record.status === "running") {
-        record.abortController?.abort();
-        record.status = "stopped";
-        record.completedAt = Date.now();
-        count++;
-      }
-    }
+    for (const id of ids) if (this.abort(id)) count++;
     return count;
   }
 

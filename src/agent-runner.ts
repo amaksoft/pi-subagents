@@ -42,6 +42,7 @@ export const SUBAGENT_TOOL_NAMES = {
   WORKFLOW: "SubagentWorkflow",
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
+  STOP: "stop_subagent",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -857,7 +858,7 @@ export async function runAgent(
   // scoping below re-admits them explicitly (registry deny + active-set narrow).
   const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
   // At (or past) the cap this agent can never spawn, so it can never own a child
-  // to fetch from or steer either — inject nothing rather than three tools whose
+  // to fetch from, steer, or stop either — inject nothing rather than four tools whose
   // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
   // "nesting off" instead of "nesting always fails".
   const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth

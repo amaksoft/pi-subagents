@@ -25,7 +25,7 @@ import {
   streamToOutputFile,
   writeInitialEntry,
 } from "./output-file.js";
-import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { getForegroundOutcomeNote, getStatusNote, isStoppableStatus, partialOutputSuffix } from "./status-note.js";
 import type {
   AgentConfig,
   AgentInvocation,
@@ -47,7 +47,12 @@ let maxSubagentDepth = 2;
 export function getMaxSubagentDepth(): number { return maxSubagentDepth; }
 export function setMaxSubagentDepth(n: number): void { maxSubagentDepth = Math.max(0, Math.floor(n)); }
 
-const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
+const NESTED_TOOL_NAMES = {
+  AGENT: "Agent",
+  GET_RESULT: "get_subagent_result",
+  STEER: "steer_subagent",
+  STOP: "stop_subagent",
+} as const;
 
 interface NestedSpawnOptions {
   description: string;
@@ -89,6 +94,13 @@ export interface NestedAgentManager {
     onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
+  /**
+   * Abort a running or queued child. Optional so out-of-tree stubs built
+   * against the pre-stop shape still satisfy this interface — the stop tool
+   * degrades to a plain refusal when it is absent. The real AgentManager
+   * always provides it.
+   */
+  abort?(id: string): boolean;
   resume(id: string, prompt: string, signal?: AbortSignal): Promise<AgentRecord | undefined>;
 }
 
@@ -158,7 +170,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   };
 
   const agentTool = defineTool({
-    name: NESTED_TOOL_NAMES[0],
+    name: NESTED_TOOL_NAMES.AGENT,
     label: "Agent",
     description:
       "Launch a child-safe nested subagent for bounded delegated work. " +
@@ -363,7 +375,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   });
 
   const resultTool = defineTool({
-    name: NESTED_TOOL_NAMES[1],
+    name: NESTED_TOOL_NAMES.GET_RESULT,
     label: "Get Nested Agent Result",
     description: "Check or wait for a background nested agent owned by this parent.",
     parameters: Type.Object({
@@ -390,7 +402,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   });
 
   const steerTool = defineTool({
-    name: NESTED_TOOL_NAMES[2],
+    name: NESTED_TOOL_NAMES.STEER,
     label: "Steer Nested Agent",
     description: "Send guidance to a running nested agent owned by this parent.",
     parameters: Type.Object({
@@ -418,5 +430,37 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     },
   });
 
-  return [agentTool, resultTool, steerTool];
+  const stopTool = defineTool({
+    name: NESTED_TOOL_NAMES.STOP,
+    label: "Stop Nested Agent",
+    description: "Stop a running or queued nested agent owned by this parent — for stuck children that steering cannot redirect. Otherwise steer the child or let it finish.",
+    parameters: Type.Object({
+      agent_id: Type.String(),
+    }),
+    execute: async (_toolCallId, params) => {
+      const record = context.manager.getRecord(params.agent_id);
+      if (!record) {
+        return textResult(`Nested agent "${params.agent_id}" not found. Only children this parent spawned can be stopped, while they are running or queued.`, true);
+      }
+      if (!ownsRecord(record, context.parentAgentId)) {
+        return textResult(`Nested agent "${params.agent_id}" is not owned by this parent. Only children this parent spawned can be stopped.`, true);
+      }
+      // Capability before status: on a runtime without abort, a settled child
+      // must report the missing capability, not a status.
+      if (typeof context.manager.abort !== "function") {
+        return textResult(`Stop is not available in this session — steer the child instead, or let it finish.`, true);
+      }
+      if (!isStoppableStatus(record.status)) {
+        return textResult(`Nested agent "${params.agent_id}" is not running (status: ${record.status}). Nothing to stop. Use get_subagent_result to read what it produced.`, true);
+      }
+      // Read for the message below: abort() mutates the status.
+      const status = record.status;
+      if (!context.manager.abort(params.agent_id)) {
+        return textResult(`Nested agent "${params.agent_id}" could not be stopped (status was: ${status}). Use get_subagent_result to read what it produced.`, true);
+      }
+      return textResult(`Stopped nested agent ${params.agent_id}. Its partial output is flagged as incomplete — use get_subagent_result to read what it produced.`);
+    },
+  });
+
+  return [agentTool, resultTool, steerTool, stopTool];
 }
