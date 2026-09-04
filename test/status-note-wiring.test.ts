@@ -89,7 +89,7 @@ describe("status note reaches the parent through the real handlers", () => {
     // otherwise slip through, and they are different outcomes.
     expect(out).toContain("aborted at the turn limit");
     expect(out).toContain("partial work so far");     // partial result still delivered
-    expect(out).not.toContain("STOPPED BY THE USER"); // not mislabelled as a user stop
+    expect(out).not.toContain("STOPPED"); // not mislabelled as stopped
 
     // The two answers a foreground parent needs: is this all of it, and is the
     // task done. The first is what #174 turned on — the parent has no agent id,
@@ -131,7 +131,9 @@ describe("status note reaches the parent through the real handlers", () => {
     finish({ responseText: "partial work so far", session: { dispose: vi.fn() }, aborted: false, steered: false });
 
     const out = textOf(await call);
-    expect(out).toContain("STOPPED BY THE USER");
+    expect(out).toContain("STOPPED");
+    expect(out).toContain("(STOPPED — everything");
+    expect(out).not.toContain("BY THE USER"); // actor-neutral: stops arrive from model, human, RPC alike
     expect(out).toContain("everything the agent produced is above");
     // Same claim, same confidence, same words as the aborted case — only the
     // lead clause distinguishes them.
@@ -199,7 +201,7 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(pi.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("background user-stop → get_subagent_result flags STOPPED BY THE USER (not completed)", async () => {
+  it("background user-stop → get_subagent_result flags STOPPED (not completed)", async () => {
     // A background agent that never settles on its own — only a stop ends it.
     vi.mocked(runAgent).mockReturnValue(new Promise(() => {}) as any);
     const { pi, tools, eventHandlers, lifecycle } = makePi();
@@ -222,7 +224,9 @@ describe("status note reaches the parent through the real handlers", () => {
     );
 
     const out = textOf(res);
-    expect(out).toContain("STOPPED BY THE USER");
+    expect(out).toContain("STOPPED");
+    expect(out).toContain("(STOPPED before completion");
+    expect(out).not.toContain("BY THE USER");
     expect(out).toContain("the task was NOT finished");
     expect(out).not.toContain("Done"); // not surfaced as a normal completion
 

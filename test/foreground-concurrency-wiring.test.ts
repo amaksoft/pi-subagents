@@ -124,7 +124,7 @@ describe("maxConcurrentForeground, through the Agent tool", () => {
     controller.abort();
 
     const result = await second; // resolves — never rejects
-    expect(textOf(result)).toContain("STOPPED BY THE USER");
+    expect(textOf(result)).toContain("STOPPED");
     expect(result.isError).toBeFalsy();
 
     // Freeing the slot must not start the agent the user just stopped.

@@ -20,14 +20,18 @@ export function isStoppableStatus(status: string): boolean {
  * agent can't mistake partial output for a completed result. Empty string for a
  * clean completion (and any unknown/non-terminal status).
  *
- * `stopped` (a human aborted it) is deliberately distinct from `aborted` (the
- * turn limit was hit) — the parent should treat human intervention differently
- * from a budget cutoff.
+ * `stopped` is deliberately distinct from `aborted` (the turn limit was hit) —
+ * the parent should treat an intervention differently from a budget cutoff.
+ * Deliberately actor-neutral: stops arrive from the model (stop tools),
+ * the human (FleetView, viewer, Esc), RPC peers, and abortAll, and the note
+ * cannot tell which. An earlier wording named the user; that lied on every
+ * non-human path and could suppress a legitimate retry ("a human killed it,
+ * don't restart") exactly where the stopper itself was about to try again.
  */
 export function getStatusNote(status: string): string {
   switch (status) {
     case "stopped":
-      return " (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)";
+      return " (STOPPED before completion — output is partial; the task was NOT finished)";
     case "aborted":
       return " (aborted — hit the turn limit before completion; output may be incomplete)";
     case "steered":
@@ -52,8 +56,9 @@ export function getStatusNote(status: string): string {
  *
  * Only the lead clause varies between the three, and each variation carries
  * information: `wrapped up` vs `aborted` tells the parent whether the output is
- * a considered final answer or a fragment, and `stopped` shouts because a human
- * intervening outranks everything else in the string. Only `steered` hedges on
+ * a considered final answer or a fragment, and `stopped` shouts because an
+ * intervention outranks everything else in the string — whatever stopped the
+ * run, the task is unfinished and the output is a fragment. Only `steered` hedges on
  * completion — it was told to wrap up and did, so it may well have finished at
  * the limit; an aborted run blew through its grace turns while still working,
  * and `stopped` can only fire on a running agent, so neither ever delivered a
@@ -74,7 +79,7 @@ export function getStatusNote(status: string): string {
 export function getForegroundOutcomeNote(status: string): string {
   switch (status) {
     case "stopped":
-      return " (STOPPED BY THE USER — everything the agent produced is above; the task is unfinished)";
+      return " (STOPPED — everything the agent produced is above; the task is unfinished)";
     case "aborted":
       return " (aborted at the turn limit — everything the agent produced is above; the task is unfinished)";
     case "steered":
