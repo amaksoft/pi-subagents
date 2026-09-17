@@ -195,12 +195,17 @@ export function disarmWorkflowTimeout(task: WorkflowTask): void {
  * the next tick rather than throwing inside the caller. The stored onTimeout
  * lets pause/resume re-arm without new closures.
  */
+/** Largest setTimeout delay that fires on time (~24.8 days); beyond it Node warns and fires in 1ms. */
+export const MAX_TIMEOUT_MS = 2_147_483_647;
+
 export function armWorkflowTimeout(task: WorkflowTask, onExpire?: () => void, now = Date.now()): void {
   disarmWorkflowTimeout(task);
   if (onExpire !== undefined) task.onTimeout = onExpire;
   const budget = task.timeoutMs ?? 0;
   if (budget <= 0 || task.onTimeout === undefined) return;
-  const remaining = budget - activeElapsedMs(task, now);
+  // Clamp, don't reject: an absurd budget means "effectively unlimited",
+  // never "kill this run immediately" — setTimeout overflows to ~1ms.
+  const remaining = Math.min(budget - activeElapsedMs(task, now), MAX_TIMEOUT_MS);
   const timer = setTimeout(() => {
     task.timeoutTimer = undefined;
     task.timeoutFired = true;

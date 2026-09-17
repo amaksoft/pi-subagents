@@ -73,7 +73,7 @@ import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/met
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
-import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, MAX_TIMEOUT_MS, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -2591,9 +2591,10 @@ Terse command-style prompts produce shallow, generic work.
 
       // Minutes, model-authored: finite and positive wins, anything else is
       // unlimited (0/negative cannot mean "kill immediately" — that would
-      // turn a typo into a run that can never start).
+      // turn a typo into a run that can never start). Capped so the ms value
+      // cannot overflow setTimeout (~24.8 days) into an instant kill.
       const timeoutMs = typeof params.timeout === "number" && Number.isFinite(params.timeout) && params.timeout > 0
-        ? Math.round(params.timeout * 60_000)
+        ? Math.min(Math.round(params.timeout * 60_000), MAX_TIMEOUT_MS)
         : undefined;
       const task = createWorkflowTask({
         id: runId,
@@ -2998,7 +2999,7 @@ Terse command-style prompts produce shallow, generic work.
     label: "Snooze Agent",
     description:
       "Give a running top-level agent more time without touching its run — the judge's alternative to stopping when get_subagent_result shows a live tail (build progressing) or a plausibly slow step. " +
-      "Clears the current stall episode and pushes any run deadline out by the given minutes (default 10). Sends nothing into the agent, unlike steer_subagent. " +
+      "Clears the current stall episode and suppresses re-flagging for the given minutes (default 10): flag, FleetView, counts and auto-abort all hold fire until it lapses. Sends nothing into the agent, unlike steer_subagent. " +
       "Nested children belong to their owner — this tool refuses them.",
     promptSnippet: "Give a slow-but-working subagent more time",
     parameters: Type.Object({
@@ -3031,7 +3032,7 @@ Terse command-style prompts produce shallow, generic work.
       }
       return textResult(
         `Snoozed agent ${record.id} (${record.description}) for ${minutes} minute${minutes === 1 ? "" : "s"}. ` +
-        `Its silence clock restarts now; it will flag as stalled again only after a fresh full threshold of silence.`,
+        `No stall flags, nudges, or auto-abort until it lapses; fresh heartbeats still prove life meanwhile.`,
       );
     },
   }));
@@ -4151,7 +4152,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
   // lists the same store and hides spawned (subagent) sessions — the entries
   // that bury real conversations under hundreds of general-purpose#… rows.
   pi.registerCommand("resume-filtered", {
-    description: "Resume an interactive session (hides subagent sessions)",
+    description: "Resume a session from a collapsible tree (children collapsed by default; non-tui falls back to hiding subagent sessions)",
     handler: async (args, ctx) => {
       await runResumeFiltered(
         {

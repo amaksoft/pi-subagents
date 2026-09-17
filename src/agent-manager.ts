@@ -1602,7 +1602,12 @@ export class AgentManager {
   /** Abort running agents silent past the threshold. Default off (see settings). */
   private stallAutoAbort = false;
 
-  /** Override the stall threshold (tests, future settings). */
+  /**
+   * Override the stall threshold. Deliberately unclamped: tests inject
+   * millisecond thresholds, while user-facing values pass through the
+   * settings loader's [1min, 24h] clamp first. Do not "unify" the two —
+   * the raw setter is a seam, the clamp is policy.
+   */
   setStallThresholdMs(ms: number) {
     this.stallThresholdMs = Math.max(1, ms);
   }
@@ -1618,9 +1623,11 @@ export class AgentManager {
   }
 
   /**
-   * Snooze a running agent: forgive the current silence episode and push any
-   * deadline out. The judge's "give it more time" — side-effect-free towards
-   * the agent itself (unlike steering, it sends nothing into the run).
+   * Snooze a running agent for `minutes`: forgive the current silence episode
+   * and suppress re-flagging until the window lapses. The judge's "give it
+   * more time" — side-effect-free towards the agent itself (unlike steering,
+   * it sends nothing into the run). Heartbeat, flag clear, and snoozedUntil:
+   * deliberately NOT lastOutputAt (that would fabricate output evidence).
    * Returns false when there is nothing to snooze (missing, non-running, or
    * settled record).
    */
@@ -1629,11 +1636,8 @@ export class AgentManager {
     if (!record || record.status !== "running") return false;
     const now = Date.now();
     record.lastActivityAt = now;
-    record.lastOutputAt = now;
     record.stalledSince = undefined;
-    // Extend an existing deadline only — never arm one on an unlimited run,
-    // or a snooze today would become a surprise budget when timeouts land.
-    if (record.timeoutMs !== undefined) record.timeoutMs += minutes * 60_000;
+    record.snoozedUntil = now + Math.max(1, minutes) * 60_000;
     return true;
   }
 
@@ -1672,7 +1676,11 @@ export class AgentManager {
     try {
       this.onStall?.(record);
     } catch { /* ignore stall side-effect errors */ }
-    if (this.stallAutoAbort && record.status === "running") {
+    // Top-level only — the same ownership boundary stop_subagent enforces.
+    // Nested children belong to their parent agent, workflow children to
+    // their run (which has its own budget + skip/retry controls); killing
+    // either from a global sweep would break a plan the sweeper cannot see.
+    if (this.stallAutoAbort && record.status === "running" && isTopLevelAgent(record)) {
       this.abort(id);
     }
   }

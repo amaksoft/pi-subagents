@@ -591,6 +591,12 @@ describe("settings persistence", () => {
       expect(appliers.setMaxConcurrentForeground).not.toHaveBeenCalled();
     });
 
+    it("skips stall keys when absent", () => {
+      applySettings({}, appliers);
+      expect(appliers.setStallThresholdMs).not.toHaveBeenCalled();
+      expect(appliers.setStallAutoAbort).not.toHaveBeenCalled();
+    });
+
     it("applies reportUsage and showCost", () => {
       applySettings({ reportUsage: true, showCost: true }, appliers);
       expect(appliers.setReportUsage).toHaveBeenCalledWith(true);

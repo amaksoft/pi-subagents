@@ -45,12 +45,19 @@ export function trackToolActivity(
 ): void {
   const now = Date.now();
   if (activity.type === "start") {
+    // Latest wins: parallel same-tool calls share one slot (documented
+    // residual — see below), sequential calls always describe the newest.
     record.currentTool = { name: activity.toolName, startedAt: now };
   } else {
-    record.currentTool = undefined;
+    // Clear only when the ending call is the tracked one: with parallel
+    // calls (start A, start B, end A) an unconditional clear would wipe B
+    // and its tail while it is still running.
+    if (record.currentTool?.name === activity.toolName) {
+      record.currentTool = undefined;
+      // The tail describes the finished call — a new call starts blank.
+      record.liveOutput = undefined;
+    }
     record.toolUses++;
-    // The tail describes the finished call — a new call starts blank.
-    record.liveOutput = undefined;
   }
   record.lastActivityAt = now;
   record.stalledSince = undefined;
@@ -140,13 +147,16 @@ export function stallElapsedMs(
 
 /** True when a running agent has been silent past the threshold.
  * Queued agents are never stalled: their silence is waiting, not wedging —
- * and the auto-abort below must never kill work that hasn't started. */
+ * and the auto-abort below must never kill work that hasn't started.
+ * Snoozed agents are never stalled until the snooze lapses: the judge asked
+ * for quiet, so flag, UI, counts and auto-abort all hold fire together. */
 export function isStalled(
-  record: Pick<AgentRecord, "status" | "lastActivityAt">,
+  record: Pick<AgentRecord, "status" | "lastActivityAt" | "snoozedUntil">,
   now = Date.now(),
   thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
 ): boolean {
   if (record.status !== "running") return false;
+  if (record.snoozedUntil !== undefined && now < record.snoozedUntil) return false;
   return stallElapsedMs(record, now) >= thresholdMs;
 }
 
@@ -156,7 +166,7 @@ export function isStalled(
  * Undefined when not stalled.
  */
 export function describeStall(
-  record: Pick<AgentRecord, "status" | "lastActivityAt" | "currentTool">,
+  record: Pick<AgentRecord, "status" | "lastActivityAt" | "currentTool" | "snoozedUntil">,
   now = Date.now(),
   thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
 ): string | undefined {

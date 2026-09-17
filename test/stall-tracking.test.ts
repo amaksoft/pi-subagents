@@ -182,3 +182,27 @@ describe("describeToolActivity", () => {
     ).toBe("bash for 5m, silent throughout");
   });
 });
+
+describe("parallel tool tracking", () => {
+  it("an unrelated end does not wipe the running tool or its tail", async () => {
+    const { pushLiveOutput, trackToolActivity } = await import("../src/status-note.js");
+    const record = { toolUses: 0, lastActivityAt: 0 } as any;
+    trackToolActivity(record, { type: "start", toolName: "bash" });
+    pushLiveOutput(record, "building…");
+    trackToolActivity(record, { type: "start", toolName: "read" });
+    // Latest wins the slot…
+    expect(record.currentTool?.name).toBe("read");
+    // …but ending the earlier call must not clear the live one or its tail.
+    // (Same-name parallel calls share the slot — documented residual.)
+    trackToolActivity(record, { type: "start", toolName: "bash" });
+    pushLiveOutput(record, "still building…");
+    trackToolActivity(record, { type: "end", toolName: "read" });
+    expect(record.currentTool?.name).toBe("bash");
+    expect(record.liveOutput).toContain("still building…");
+    expect(record.toolUses).toBe(1);
+    trackToolActivity(record, { type: "end", toolName: "bash" });
+    expect(record.currentTool).toBeUndefined();
+    expect(record.liveOutput).toBeUndefined();
+    expect(record.toolUses).toBe(2);
+  });
+});

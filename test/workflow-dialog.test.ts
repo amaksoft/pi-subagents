@@ -372,19 +372,25 @@ describe("sub-status annotations", () => {
     } as any;
     const live = { status: "running", lastActivityAt: Date.now() } as any;
     const getAgentRecord = (id: string) => (id === "rec-stalled" ? stalled : id === "rec-live" ? live : undefined);
-    const lines = plainWorkflowDialogLines(
+    const rows = plainWorkflowDialogLines(
       layoutWorkflowDialog(
         input({
           progress: [
-            agentEntry({ index: 0, recordId: "rec-stalled" }),
-            agentEntry({ index: 1, recordId: "rec-live" }),
-            agentEntry({ index: 2, recordId: "rec-gone" }),
+            agentEntry({ index: 0, label: "stalled-one", recordId: "rec-stalled" }),
+            agentEntry({ index: 1, label: "live-one", recordId: "rec-live" }),
+            agentEntry({ index: 2, label: "gone-one", recordId: "rec-gone" }),
           ],
           getAgentRecord,
         }),
       ),
-    ).join("\n");
-    expect(lines).toContain("stalled 22m in bash");
+    );
+    const stalledRow = rows.find(l => l.includes("stalled-one"))!;
+    const liveRow = rows.find(l => l.includes("live-one"))!;
+    const goneRow = rows.find(l => l.includes("gone-one"))!;
+    // Diagnosis lands on exactly the stalled row — not smeared across the list.
+    expect(stalledRow).toContain("stalled 22m in bash");
+    expect(liveRow).not.toContain("stalled");
+    expect(goneRow).not.toContain("stalled");
   });
 
   it("rows render unchanged without a record lookup", () => {

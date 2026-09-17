@@ -197,11 +197,13 @@ export interface AgentRecord {
    */
   lastOutputAt?: number;
   /**
-   * Per-run wall-clock budget in ms (proposed per-agent timeout; unset =
-   * unlimited). Snooze extends it; the (unbuilt) timeout enforcement would
-   * consume it. Present so the judge's "more time" survives the feature.
+   * Snoozed-until timestamp (see manager.snooze). While set and in the
+   * future, isStalled stays false: the judge asked for quiet, so all
+   * surfaces — flag, FleetView, counts, auto-abort — hold their fire.
+   * Heartbeats do not clear it (fresh activity wouldn't flag anyway);
+   * time passing does.
    */
-  timeoutMs?: number;
+  snoozedUntil?: number;
   /**
    * Bounded tail of live tool output (last lines of bash stdout). Judge
    * fuel for the main session: a moving tail means working, a stale one

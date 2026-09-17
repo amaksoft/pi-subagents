@@ -3152,33 +3152,40 @@ describe("AgentManager snooze (judge's more-time)", () => {
     expect(manager.snooze(id, 10)).toBe(true);
     expect(record.stalledSince).toBeUndefined();
     expect(record.lastActivityAt).toBeGreaterThan(Date.now() - 1000);
-    expect(record.lastOutputAt).toBeDefined();
+    // No fabricated output evidence: silence forgiven, nothing invented.
+    expect(record.lastOutputAt).toBeUndefined();
+    expect(record.snoozedUntil).toBeGreaterThan(Date.now());
+    // The snooze window suppresses the next flag.
+    record.lastActivityAt = Date.now() - 1000;
+    manager.sweepStall(id, record);
+    expect(record.stalledSince).toBeUndefined();
   });
 
-  it("extends an existing deadline, never arms one", async () => {
+  it("snooze suppresses flags until the window lapses, then re-arms", async () => {
+    const { isStalled } = await import("../src/status-note.js");
     manager = new AgentManager();
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "done",
-      session: mockSession(),
-      aborted: false,
-      steered: false,
+    manager.setStallThresholdMs(1);
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise(() => {}); // never settles: stays running
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
     });
     const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "s", isBackground: true });
     const record = manager.getRecord(id)!;
-    await record.promise;
-    // Settled: nothing to snooze.
-    expect(manager.snooze(id, 10)).toBe(false);
-    // Running without a deadline stays deadline-free.
-    const id2 = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "s2", isBackground: true });
-    const record2 = manager.getRecord(id2)!;
-    expect(record2.timeoutMs).toBeUndefined();
-    expect(manager.snooze(id2, 10)).toBe(true);
-    expect(record2.timeoutMs).toBeUndefined();
-    // With a deadline, it pushes out.
-    record2.timeoutMs = 600_000;
-    expect(manager.snooze(id2, 10)).toBe(true);
-    expect(record2.timeoutMs).toBe(1_200_000);
-    await record2.promise;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(record.status).toBe("running");
+    // Old silence + fresh snooze = not stalled anywhere it matters.
+    record.lastActivityAt = Date.now() - 60_000;
+    expect(manager.snooze(id, 10)).toBe(true);
+    expect(isStalled(record, Date.now(), 1)).toBe(false);
+    manager.sweepStall(id, record);
+    expect(record.stalledSince).toBeUndefined();
+    // Lapsed window + a fresh full threshold of silence = stalled again.
+    // (Snooze refreshed the heartbeat, so old silence does not count.)
+    record.snoozedUntil = Date.now() - 1;
+    record.lastActivityAt = Date.now() - 60_000;
+    expect(isStalled(record, Date.now(), 1)).toBe(true);
+    manager.sweepStall(id, record);
+    expect(record.stalledSince).toBeDefined();
   });
 
   it("refuses missing and non-running records", () => {
