@@ -3384,3 +3384,68 @@ describe("provisioning status (explicit startup, no optimistic running)", () => 
     expect(isStalled(record, Date.now(), 1)).toBe(false);
   });
 });
+
+describe("startup failure unification (StartupError)", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("immediate failure travels typed through spawnAndWait (#179 preserved)", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    const { StartupError } = await import("../src/domain/agent.js");
+    // Creation returning undefined is the strict-isolation failure (the
+    // curated 'Cannot run with isolation' message, not a raw throw).
+    vi.mocked(createWorktree).mockResolvedValue(undefined as never);
+    manager = new AgentManager();
+    await expect(
+      manager.spawnAndWait(mockPi, mockCtx, "Explore", "go", {
+        description: "x",
+        isolation: "worktree",
+      }),
+    ).rejects.toThrow('Cannot run with isolation: "worktree"');
+    // Typed for programmatic callers: message preserved, path marked immediate.
+    try {
+      await manager.spawnAndWait(mockPi, mockCtx, "Explore", "go", {
+        description: "y",
+        isolation: "worktree",
+      });
+      expect.unreachable("must throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(StartupError);
+      expect((err as InstanceType<typeof StartupError>).queuedPool).toBeUndefined();
+      expect((err as Error).message).toContain('Cannot run with isolation');
+    }
+  });
+
+  it("queued failure parks on the record with the same message", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockImplementation(async () => {
+      throw new Error("copy failed");
+    });
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    // Fill the pool so the next spawn queues…
+    const holder = manager.spawn(mockPi, mockCtx, "Explore", "holder", { description: "h", isBackground: true });
+    // Waiter needs repo-copy setup so its start can fail; holder runs plain.
+    const waiter = manager.spawn(mockPi, mockCtx, "Explore", "waiter", {
+      description: "w",
+      isBackground: true,
+      isolation: "worktree",
+    });
+    expect(manager.getRecord(waiter)!.status).toBe("queued");
+    // …holder settles, drain starts the waiter, whose copy fails and parks
+    // (never throws out of the drain — nobody is awaiting there).
+    await manager.getRecord(holder)!.promise;
+    await new Promise(r => setTimeout(r, 20));
+    const record = manager.getRecord(waiter)!;
+    expect(record.status).toBe("error");
+    expect(record.error).toMatch(/copy failed/);
+  });
+});

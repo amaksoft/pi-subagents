@@ -57,3 +57,19 @@ describe("reduceSettle rejected", () => {
     ).toEqual({ status: "stopped" });
   });
 });
+
+describe("StartupError", () => {
+  it("carries the path and cause, behaves as an Error", async () => {
+    const { StartupError } = await import("../src/domain/agent.js");
+    const cause = new Error("git gone");
+    const err = new StartupError("Cannot run with isolation", { cause, queuedPool: "background" });
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(StartupError);
+    expect(err.name).toBe("StartupError");
+    expect(err.message).toBe("Cannot run with isolation");
+    expect(err.queuedPool).toBe("background");
+    expect(err.cause).toBe(cause);
+    const immediate = new StartupError("nope", {});
+    expect(immediate.queuedPool).toBeUndefined();
+  });
+});

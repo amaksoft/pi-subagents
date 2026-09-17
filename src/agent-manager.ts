@@ -22,7 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import { reduceSettle } from "./domain/agent.js";
+import { reduceSettle, StartupError } from "./domain/agent.js";
 import {
   acquireSlot,
   emptyLedger,
@@ -674,6 +674,39 @@ export class AgentManager {
    *   as the throw out of `spawn()` did: no orphan in `listAgents()`, and the
    *   handle goes back.
    */
+  /**
+   * Single owner for startup-failure disposition (Phase-2 unification).
+   * Queued starts park the failure on the record — nobody is awaiting at
+   * drain time — while immediate starts delete the record and travel as a
+   * StartupError through the startups channel, rethrown by spawnAndWait
+   * (#179: pi only fails a tool call on throw). A stop that landed
+   * mid-startup owns the record either way: neither relabeled (queued) nor
+   * deleted (immediate), so get_subagent_result still finds it.
+   * Returns the typed error for the caller to throw.
+   */
+  private failStartup(id: string, record: AgentRecord, err: unknown, queuedPool: Pool | undefined): StartupError {
+    this.startups.delete(id);
+    const failure = new StartupError(err instanceof Error ? err.message : String(err), {
+      cause: err,
+      queuedPool,
+    });
+    if (record.status !== "stopped") {
+      if (queuedPool !== undefined) {
+        // Mirrors settleRun: an inline caller gets this failure as a throw
+        // out of spawnAndWait, so an unconsumed record would ALSO nudge the
+        // session about it — the same failure reported twice.
+        if (queuedPool === "foreground") record.resultConsumed = true;
+        record.status = "error";
+        record.error = failure.message;
+        record.completedAt = Date.now();
+        this.onComplete?.(record);
+      } else {
+        this.agents.delete(id);
+      }
+    }
+    return failure;
+  }
+
   private launch(id: string, record: AgentRecord, args: SpawnArgs, queuedPool: Pool | undefined): Promise<void> {
     // Leaving the queue (or starting now): the run exists but has not kicked
     // off — provisioning, not running and no longer merely queued.
@@ -684,29 +717,11 @@ export class AgentManager {
     const startup = this.startAgent(id, record, args).then(
       () => { this.startups.delete(id); },
       (err) => {
-        this.startups.delete(id);
-        // A stop that landed mid-startup owns the record now: don't relabel it
-        // "error" (queued path) or delete it (immediate path) — the stop was
-        // already reported, and get_subagent_result must still find it.
-        // The slot is freed and the queue drains either way.
-        if (record.status !== "stopped") {
-          if (queuedPool !== undefined) {
-            // Mirrors settleRun: an inline caller gets this failure as a throw
-            // out of spawnAndWait, so an unconsumed record would ALSO nudge the
-            // session about it — the same failure reported twice.
-            if (queuedPool === "foreground") record.resultConsumed = true;
-            record.status = "error";
-            record.error = err instanceof Error ? err.message : String(err);
-            record.completedAt = Date.now();
-            this.onComplete?.(record);
-          } else {
-            this.agents.delete(id);
-          }
-        }
+        const failure = this.failStartup(id, record, err, queuedPool);
         // The agent never kept its slot (startAgent gives it back on failure),
         // so anything queued behind it can go now.
         this.drainQueue();
-        throw err;
+        throw failure;
       },
     );
     this.startups.set(id, startup);
@@ -717,10 +732,11 @@ export class AgentManager {
   }
 
   /**
-   * Resolves once the agent is actually running, and rejects with the startup
-   * failure (strict worktree isolation) that `spawn()` used to throw before the
-   * repo copy became async. Resolves immediately for an agent that is already
-   * running, still queued, or unknown — so callers can await it unconditionally.
+   * Resolves once the agent is actually running, and rejects with a
+   * StartupError for startup failure (strict worktree isolation) that
+   * `spawn()` used to throw before the repo copy became async. Resolves
+   * immediately for an agent that is already running, still queued, or
+   * unknown — so callers can await it unconditionally.
    *
    * Call it in the same tick as the `spawn()` it belongs to: a failed startup
    * takes its record (and this entry) with it, exactly as the throw did.

@@ -48,6 +48,18 @@ Commands, never imports domain mutators.
 Deliberately NOT machines: budget (deadline helper), stall (derived
 predicate — see status-note.ts), schedule mapping, notifications.
 
+## Status
+
+- [x] Phase 0: lint bans, golden journal fixtures, this doc.
+- [x] Phase 1 (queue seam): `src/domain/queue.ts` + delegation.
+- [x] Phase 1 (settle seam): `src/domain/agent.ts` `reduceSettle` + delegation.
+- [x] Phase 2 (startup): `provisioning` status end-to-end; `StartupError` +
+  `failStartup` unifying queued-park vs immediate-throw.
+- [ ] Phase 2 remainder: `StartupError` exported for programmatic callers
+  (currently internal to the manager path).
+- [ ] Phases 3–5: settle unification via runner outcomes, workflow
+  strangler, UI + `index.ts` split.
+
 ## Migration (strangler — order matters)
 
 - **Phase 0 (this commit): freeze + lint.** `scripts/arch-lint.mjs` bans new

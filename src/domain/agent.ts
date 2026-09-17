@@ -15,7 +15,29 @@
  *   `else if (failure)`).
  */
 
+import type { Pool } from "./queue.js";
+
 export type AgentSettleStatus = "completed" | "steered" | "aborted" | "error" | "stopped";
+
+/**
+ * A run that never started: worktree creation, cwd validation, or session
+ * setup failed before kickoff. Carries which path it took — queued spawns
+ * park the failure on the record (nobody is awaiting), immediate spawns
+ * travel through the startups channel and rethrow out of spawnAndWait
+ * (#179: pi only fails a tool call on throw). Single construction site
+ * (failStartup in the manager); use instanceof to tell startup failure
+ * from run failure.
+ */
+export class StartupError extends Error {
+  /** The pool whose queue parked this start, or undefined for immediate. */
+  readonly queuedPool: Pool | undefined;
+
+  constructor(message: string, opts: { cause?: unknown; queuedPool?: Pool }) {
+    super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
+    this.name = "StartupError";
+    this.queuedPool = opts.queuedPool;
+  }
+}
 
 export type SettleInput =
   | {
