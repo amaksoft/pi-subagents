@@ -22,7 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import { DEFAULT_STALL_THRESHOLD_MS, isStalled, isStoppableStatus, touchActivity, trackToolActivity } from "./status-note.js";
+import { DEFAULT_STALL_THRESHOLD_MS, isStalled, isStoppableStatus, pushLiveOutput, touchActivity, touchOutput, trackToolActivity } from "./status-note.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
@@ -828,10 +828,15 @@ export class AgentManager {
       },
       onTurnEnd: options.onTurnEnd,
       onTextDelta: (delta, fullText) => {
-        // Streaming text is a sign of life: a long model stream with no tool
-        // calls is slow, not stuck. Assignment only — no listener fan-out.
-        touchActivity(record);
+        // Streaming text is output evidence as well as a sign of life.
+        touchOutput(record);
         options.onTextDelta?.(delta, fullText);
+      },
+      onToolOutput: (delta) => {
+        // Live tool stdout (bash deltas): bounded tail for the judge plus
+        // a heartbeat — a build streaming output never flags.
+        pushLiveOutput(record, delta);
+        touchOutput(record);
       },
       onAssistantUsage: (usage) => {
         touchActivity(record);
@@ -1268,6 +1273,10 @@ export class AgentManager {
             trackToolActivity(record, activity);
             options?.onToolActivity?.(activity);
           },
+          onToolOutput: (delta) => {
+            pushLiveOutput(record, delta);
+            touchOutput(record);
+          },
           onAssistantUsage: (usage) => {
             touchActivity(record);
             addUsage(record.lifetimeUsage, usage);
@@ -1370,6 +1379,10 @@ export class AgentManager {
       onToolActivity: (activity) => {
         trackToolActivity(record, activity);
         options.onToolActivity?.(activity);
+      },
+      onToolOutput: (delta) => {
+        pushLiveOutput(record, delta);
+        touchOutput(record);
       },
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
@@ -1602,6 +1615,26 @@ export class AgentManager {
   /** Current auto-abort arming (settings menu display). */
   isStallAutoAbort(): boolean {
     return this.stallAutoAbort;
+  }
+
+  /**
+   * Snooze a running agent: forgive the current silence episode and push any
+   * deadline out. The judge's "give it more time" — side-effect-free towards
+   * the agent itself (unlike steering, it sends nothing into the run).
+   * Returns false when there is nothing to snooze (missing, non-running, or
+   * settled record).
+   */
+  snooze(id: string, minutes: number): boolean {
+    const record = this.agents.get(id);
+    if (!record || record.status !== "running") return false;
+    const now = Date.now();
+    record.lastActivityAt = now;
+    record.lastOutputAt = now;
+    record.stalledSince = undefined;
+    // Extend an existing deadline only — never arm one on an unlimited run,
+    // or a snooze today would become a surprise budget when timeouts land.
+    if (record.timeoutMs !== undefined) record.timeoutMs += minutes * 60_000;
+    return true;
   }
 
   /** Current stall threshold (settings snapshot). */

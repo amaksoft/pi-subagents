@@ -3127,3 +3127,96 @@ describe("AgentManager stall auto-abort (opt-in)", () => {
     expect(record.status).toBe("queued");
   });
 });
+
+describe("AgentManager snooze (judge's more-time)", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("clears the stall episode and refreshes the clocks", async () => {
+    manager = new AgentManager();
+    manager.setStallThresholdMs(1);
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise(() => {});
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "slow", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await new Promise((r) => setTimeout(r, 0));
+    record.lastActivityAt = Date.now() - 1000;
+    manager.sweepStall(id, record);
+    expect(record.stalledSince).toBeDefined();
+
+    expect(manager.snooze(id, 10)).toBe(true);
+    expect(record.stalledSince).toBeUndefined();
+    expect(record.lastActivityAt).toBeGreaterThan(Date.now() - 1000);
+    expect(record.lastOutputAt).toBeDefined();
+  });
+
+  it("extends an existing deadline, never arms one", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "s", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    // Settled: nothing to snooze.
+    expect(manager.snooze(id, 10)).toBe(false);
+    // Running without a deadline stays deadline-free.
+    const id2 = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "s2", isBackground: true });
+    const record2 = manager.getRecord(id2)!;
+    expect(record2.timeoutMs).toBeUndefined();
+    expect(manager.snooze(id2, 10)).toBe(true);
+    expect(record2.timeoutMs).toBeUndefined();
+    // With a deadline, it pushes out.
+    record2.timeoutMs = 600_000;
+    expect(manager.snooze(id2, 10)).toBe(true);
+    expect(record2.timeoutMs).toBe(1_200_000);
+    await record2.promise;
+  });
+
+  it("refuses missing and non-running records", () => {
+    manager = new AgentManager();
+    expect(manager.snooze("nope", 10)).toBe(false);
+  });
+});
+
+describe("AgentManager live tool output flow", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("bash deltas update the tail and the heartbeat", async () => {
+    manager = new AgentManager();
+    let captured: any;
+    vi.mocked(runAgent).mockImplementation(
+      (_c, _t, _p, opts: any) =>
+        new Promise((resolve) => {
+          captured = opts;
+          resolve({ responseText: "", session: mockSession(), aborted: false, steered: false });
+        }),
+    );
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "build", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(typeof captured.onToolOutput).toBe("function");
+
+    captured.onToolActivity({ type: "start", toolName: "bash" });
+    const before = record.lastActivityAt;
+    captured.onToolOutput("Compiling foo…\n");
+    captured.onToolOutput("Compiling bar…\n");
+    expect(record.liveOutput).toContain("Compiling foo…");
+    expect(record.liveOutput).toContain("Compiling bar…");
+    expect(record.lastActivityAt).toBeGreaterThanOrEqual(before);
+    expect(record.lastOutputAt).toBeGreaterThanOrEqual(before);
+    await record.promise;
+  });
+});

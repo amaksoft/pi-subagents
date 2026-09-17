@@ -40,7 +40,7 @@ export interface ToolActivityLike {
  * clear a previously flagged stall. Call from every onToolActivity handler.
  */
 export function trackToolActivity(
-  record: Pick<AgentRecord, "toolUses" | "lastActivityAt" | "currentTool" | "stalledSince">,
+  record: Pick<AgentRecord, "toolUses" | "lastActivityAt" | "currentTool" | "stalledSince" | "liveOutput">,
   activity: ToolActivityLike,
 ): void {
   const now = Date.now();
@@ -49,6 +49,8 @@ export function trackToolActivity(
   } else {
     record.currentTool = undefined;
     record.toolUses++;
+    // The tail describes the finished call — a new call starts blank.
+    record.liveOutput = undefined;
   }
   record.lastActivityAt = now;
   record.stalledSince = undefined;
@@ -63,6 +65,69 @@ export function touchActivity(
 ): void {
   record.lastActivityAt = Date.now();
   record.stalledSince = undefined;
+}
+
+/**
+ * Output evidence: streamed text or tool stdout. Refreshes both the stall
+ * heartbeat and the output timestamp — a build streaming stdout keeps
+ * proving life without ever ending its tool call.
+ */
+export function touchOutput(
+  record: Pick<AgentRecord, "lastActivityAt" | "stalledSince" | "lastOutputAt">,
+): void {
+  const now = Date.now();
+  record.lastActivityAt = now;
+  record.lastOutputAt = now;
+  record.stalledSince = undefined;
+}
+
+/**
+ * Append a stdout delta to the record's bounded tail. Keeps the last
+ * LIVE_OUTPUT_LINES lines within LIVE_OUTPUT_CHARS so one chatty build
+ * cannot grow memory or the judge surfaces that read it.
+ */
+export const LIVE_OUTPUT_LINES = 10;
+export const LIVE_OUTPUT_CHARS = 2000;
+
+export function pushLiveOutput(
+  record: Pick<AgentRecord, "liveOutput">,
+  delta: string,
+  maxLines = LIVE_OUTPUT_LINES,
+  maxChars = LIVE_OUTPUT_CHARS,
+): void {
+  if (!delta) return;
+  const lines = (record.liveOutput ? `${record.liveOutput}\n${delta}` : delta).split("\n");
+  const tail = lines.slice(-maxLines).join("\n");
+  record.liveOutput = tail.length > maxChars ? tail.slice(-maxChars) : tail;
+}
+
+/** Clear the tail when its tool call ends — it describes the current call only. */
+export function clearLiveOutput(record: Pick<AgentRecord, "liveOutput">): void {
+  record.liveOutput = undefined;
+}
+
+/** Compact age: `30s`, `21m`. Floor 0, seconds under a minute. */
+export function formatStallAge(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.round(s / 60)}m`;
+}
+
+/**
+ * Judge line for a running tool: `bash for 22m, output 30s ago` (working)
+ * vs `bash for 22m, silent throughout` (wedged or fruitless). Undefined
+ * when no tool is running — idleness between tools is normal, not evidence.
+ */
+export function describeToolActivity(
+  record: Pick<AgentRecord, "currentTool" | "lastOutputAt">,
+  now = Date.now(),
+): string | undefined {
+  const tool = record.currentTool;
+  if (!tool) return undefined;
+  const elapsed = formatStallAge(now - tool.startedAt);
+  const out = record.lastOutputAt !== undefined && record.lastOutputAt >= tool.startedAt
+    ? `output ${formatStallAge(now - record.lastOutputAt)} ago`
+    : "silent throughout";
+  return `${tool.name} for ${elapsed}, ${out}`;
 }
 
 /** Milliseconds since the record's last sign of life (floor 0). */

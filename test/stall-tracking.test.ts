@@ -133,3 +133,52 @@ describe("describeFleetActivity", () => {
     ).toBeUndefined();
   });
 });
+
+describe("pushLiveOutput", () => {
+  it("keeps the last lines within caps", async () => {
+    const { pushLiveOutput, LIVE_OUTPUT_LINES, LIVE_OUTPUT_CHARS } = await import("../src/status-note.js");
+    const record = {} as any;
+    for (let i = 0; i < 30; i++) pushLiveOutput(record, `line ${i}`);
+    const lines = record.liveOutput.split("\n");
+    expect(lines.length).toBeLessThanOrEqual(LIVE_OUTPUT_LINES);
+    expect(lines[lines.length - 1]).toBe("line 29");
+    expect(record.liveOutput.length).toBeLessThanOrEqual(LIVE_OUTPUT_CHARS);
+    pushLiveOutput(record, "");
+    expect(record.liveOutput.split("\n").length).toBeLessThanOrEqual(LIVE_OUTPUT_LINES);
+  });
+
+  it("clears the tail on tool end via trackToolActivity", async () => {
+    const { pushLiveOutput, trackToolActivity } = await import("../src/status-note.js");
+    const record = { toolUses: 0, lastActivityAt: 0 } as any;
+    pushLiveOutput(record, "building…");
+    trackToolActivity(record, { type: "start", toolName: "bash" });
+    expect(record.liveOutput).toContain("building…");
+    trackToolActivity(record, { type: "end", toolName: "bash" });
+    expect(record.liveOutput).toBeUndefined();
+    expect(record.currentTool).toBeUndefined();
+  });
+});
+
+describe("describeToolActivity", () => {
+  it("distinguishes working from silent tool runs", async () => {
+    const { describeToolActivity } = await import("../src/status-note.js");
+    const now = Date.now();
+    expect(describeToolActivity({} as any, now)).toBeUndefined();
+    expect(
+      describeToolActivity(
+        { currentTool: { name: "bash", startedAt: now - 22 * 60_000 }, lastOutputAt: now - 30_000 } as any,
+        now,
+      ),
+    ).toBe("bash for 22m, output 30s ago");
+    expect(
+      describeToolActivity({ currentTool: { name: "bash", startedAt: now - 22 * 60_000 } } as any, now),
+    ).toBe("bash for 22m, silent throughout");
+    // Stale output predating the tool start does not count.
+    expect(
+      describeToolActivity(
+        { currentTool: { name: "bash", startedAt: now - 5 * 60_000 }, lastOutputAt: now - 30 * 60_000 } as any,
+        now,
+      ),
+    ).toBe("bash for 5m, silent throughout");
+  });
+});

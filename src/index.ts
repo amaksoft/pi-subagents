@@ -37,7 +37,7 @@ import { runResumeFiltered, toResumeSession } from "./resume-filtered.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
-import { describeStall, getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { describeStall, describeToolActivity, getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
@@ -2855,15 +2855,20 @@ Terse command-style prompts produce shallow, generic work.
         `Description: ${record.description}\n\n`;
 
       if (record.status === "running") {
-        // Stall/current-tool diagnosis: without it a hung agent is a black box
-        // (status + token counts never change while wedged on one tool call).
+        // Judge fuel: what tool, how long, when it last produced output, and
+        // the bounded live tail — a moving tail means working, a stale one
+        // means wedged or fruitless. Without this a hung agent is a black box.
         const stall = describeStall(record);
+        const activity = describeToolActivity(record);
         const where = stall
           ? `${stall}. Consider stop_subagent if the task is time-sensitive — partial output is readable via get_subagent_result after the stop.`
-          : record.currentTool
-            ? `Currently in ${record.currentTool.name}.`
+          : activity
+            ? `Currently ${activity}.`
             : "Between tools.";
         output += `Agent is still running. ${where} Use wait: true or check back later.`;
+        if (record.liveOutput?.trim()) {
+          output += `\n\nLive tool output (last lines):\n${record.liveOutput.trim()}`;
+        }
       } else if (record.status === "error") {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
       } else {
@@ -2982,6 +2987,51 @@ Terse command-style prompts produce shallow, generic work.
         (neverStarted
           ? `It never started, so there is no partial output.`
           : `Its partial output is flagged as incomplete, not as a completion — use get_subagent_result to read what it produced.`),
+      );
+    },
+  }));
+
+  // ---- snooze_subagent tool ----
+
+  registerToolReportingUsage(defineTool({
+    name: SUBAGENT_TOOL_NAMES.SNOOZE,
+    label: "Snooze Agent",
+    description:
+      "Give a running top-level agent more time without touching its run — the judge's alternative to stopping when get_subagent_result shows a live tail (build progressing) or a plausibly slow step. " +
+      "Clears the current stall episode and pushes any run deadline out by the given minutes (default 10). Sends nothing into the agent, unlike steer_subagent. " +
+      "Nested children belong to their owner — this tool refuses them.",
+    promptSnippet: "Give a slow-but-working subagent more time",
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "The agent ID to snooze (must be currently running). The agent's handle works too.",
+      }),
+      minutes: Type.Optional(
+        Type.Number({
+          description: "Extra minutes of grace. Defaults to 10.",
+          minimum: 1,
+          maximum: 120,
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      const record = resolveAgentRef(params.agent_id);
+      if (!record || !isTopLevelAgent(record)) {
+        return textResult(
+          `Agent "${params.agent_id}" is not a top-level agent you can snooze. Only the agent that spawned it can reach it.`,
+        );
+      }
+      if (record.status !== "running") {
+        return textResult(
+          `Agent "${params.agent_id}" is not running (status: ${record.status}). Nothing to snooze — use get_subagent_result to read what it produced.`,
+        );
+      }
+      const minutes = params.minutes ?? 10;
+      if (!manager.snooze(record.id, minutes)) {
+        return textResult(`Agent "${params.agent_id}" could not be snoozed — it finished while you were deciding.`);
+      }
+      return textResult(
+        `Snoozed agent ${record.id} (${record.description}) for ${minutes} minute${minutes === 1 ? "" : "s"}. ` +
+        `Its silence clock restarts now; it will flag as stalled again only after a fresh full threshold of silence.`,
       );
     },
   }));

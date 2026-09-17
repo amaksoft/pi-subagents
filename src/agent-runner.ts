@@ -43,6 +43,7 @@ export const SUBAGENT_TOOL_NAMES = {
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
   STOP: "stop_subagent",
+  SNOOZE: "snooze_subagent",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -498,6 +499,11 @@ export interface RunOptions {
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
+  /**
+   * Called on live tool output (currently bash stdout deltas) with the raw
+   * delta. Handlers keep a bounded tail (last lines) plus the timestamp.
+   */
+  onToolOutput?: (delta: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
@@ -1136,6 +1142,10 @@ export async function runAgent(
     if (event.type === "tool_execution_end") {
       options.onToolActivity?.({ type: "end", toolName: event.toolName });
     }
+    // Live stdout while a tool runs: bounded tail + timestamp downstream.
+    if (event.type === "bash_execution_update") {
+      options.onToolOutput?.(event.delta);
+    }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const u = (event.message as any).usage;
       if (u) options.onAssistantUsage?.({
@@ -1214,6 +1224,7 @@ export async function resumeAgent(
   prompt: string,
   options: {
     onToolActivity?: (activity: ToolActivity) => void;
+    onToolOutput?: (delta: string) => void;
     onAssistantUsage?: (usage: LifetimeUsage) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
@@ -1226,10 +1237,11 @@ export async function resumeAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
+  const unsubEvents = (options.onToolActivity || options.onToolOutput || options.onAssistantUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
         if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
         if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
+        if (event.type === "bash_execution_update") options.onToolOutput?.(event.delta);
         if (event.type === "message_end" && event.message.role === "assistant") {
           const u = (event.message as any).usage;
           if (u) options.onAssistantUsage?.({

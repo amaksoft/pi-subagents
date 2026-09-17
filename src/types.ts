@@ -190,6 +190,26 @@ export interface AgentRecord {
    */
   currentTool?: { name: string; startedAt: number };
   /**
+   * Last observable output: streamed text or tool stdout delta. A tool run
+   * with recent output is working (build progressing); one silent since
+   * start is wedged (blocked curl) or unproductive (fruitless find). The
+   * judge signal — cheaper than stdout capture, sufficient for the call.
+   */
+  lastOutputAt?: number;
+  /**
+   * Per-run wall-clock budget in ms (proposed per-agent timeout; unset =
+   * unlimited). Snooze extends it; the (unbuilt) timeout enforcement would
+   * consume it. Present so the judge's "more time" survives the feature.
+   */
+  timeoutMs?: number;
+  /**
+   * Bounded tail of live tool output (last lines of bash stdout). Judge
+   * fuel for the main session: a moving tail means working, a stale one
+   * means wedged or fruitless. Cleared on tool end — it describes the
+   * *current* call, never history.
+   */
+  liveOutput?: string;
+  /**
    * When the stall sweep last flagged this agent. Set by the periodic sweep,
    * cleared by any subsequent activity. Display-only — status is untouched,
    * so a slow-but-alive agent is never misreported as terminal.
