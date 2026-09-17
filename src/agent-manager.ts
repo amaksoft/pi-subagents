@@ -22,6 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
+import { reduceSettle } from "./domain/agent.js";
 import {
   acquireSlot,
   emptyLedger,
@@ -946,20 +947,17 @@ export class AgentManager {
       },
     })
       .then(async ({ responseText, session, aborted, steered, failure, structuredJson, structuredRetried }) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
-          // Precedence: a hard abort keeps "aborted"; then a failed final turn
-          // (provider error that pi resolved instead of rejecting, #144) is an
-          // honest "error" — not a completion with an empty or stale result.
-          if (aborted) {
-            record.status = "aborted";
-          } else if (failure) {
-            record.status = "error";
-            record.error = failure;
-          } else {
-            record.status = steered ? "steered" : "completed";
-          }
-        }
+        // Precedence lives in domain/agent.reduceSettle (aborted > error >
+        // steered > completed, stopped sticky); the manager only applies it.
+        const decision = reduceSettle({
+          kind: "resolved",
+          stopped: record.status === "stopped",
+          aborted,
+          steered,
+          failure,
+        });
+        record.status = decision.status;
+        if (decision.error !== undefined) record.error = decision.error;
         record.result = responseText;
         // Kept beside `result`, never inside it: `result` is prose meant for a
         // reader — it is previewed, transcribed, and appended to below — while
@@ -1014,11 +1012,16 @@ export class AgentManager {
         return responseText;
       })
       .catch(async (err) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
-          record.status = "error";
-        }
-        record.error = err instanceof Error ? err.message : String(err);
+        // Spawn path keeps the rejection error even on stopped records
+        // (resume paths do not) — carried explicitly, see reduceSettle.
+        const decision = reduceSettle({
+          kind: "rejected",
+          stopped: record.status === "stopped",
+          error: err instanceof Error ? err.message : String(err),
+          keepErrorWhenStopped: true,
+        });
+        record.status = decision.status;
+        if (decision.error !== undefined) record.error = decision.error;
         record.completedAt ??= Date.now();
 
         detach();
@@ -1359,16 +1362,29 @@ export class AgentManager {
         if (!isExternallyStopped()) {
           // Same contract as the spawn path (#144): a failed final turn is an
           // error, not a completion — but the resumed text stays available.
-          record.status = failure ? "error" : "completed";
-          if (failure) record.error = failure;
+          // Resume runs never abort/steer (the runner reports text+failure
+          // only), so those inputs are fixed false here.
+          const resumeDecision = reduceSettle({
+            kind: "resolved",
+            stopped: isExternallyStopped(),
+            aborted: false,
+            steered: false,
+            failure,
+          });
+          record.status = resumeDecision.status;
+          if (resumeDecision.error !== undefined) record.error = resumeDecision.error;
         }
         record.result = text;
         record.completedAt = Date.now();
       } catch (err) {
-        if (!isExternallyStopped()) {
-          record.status = "error";
-          record.error = err instanceof Error ? err.message : String(err);
-        }
+        const resumeDecision = reduceSettle({
+          kind: "rejected",
+          stopped: isExternallyStopped(),
+          error: err instanceof Error ? err.message : String(err),
+          keepErrorWhenStopped: false,
+        });
+        record.status = resumeDecision.status;
+        if (resumeDecision.error !== undefined) record.error = resumeDecision.error;
         record.completedAt = Date.now();
       } finally {
         detachCallerSignal?.();
@@ -1486,23 +1502,30 @@ export class AgentManager {
       signal: abortController.signal,
     })
       .then(({ text, failure }) => {
-        // Don't overwrite status if externally stopped via abort().
-        if (record.status !== "stopped") {
-          // Same contract as the spawn path (#144): a failed final turn is an
-          // error, not a completion — but the resumed text stays available.
-          record.status = failure ? "error" : "completed";
-          if (failure) record.error = failure;
-        }
+        // Resume runs report text+failure only: no aborted/steered inputs.
+        const resumeDecision = reduceSettle({
+          kind: "resolved",
+          stopped: record.status === "stopped",
+          aborted: false,
+          steered: false,
+          failure,
+        });
+        record.status = resumeDecision.status;
+        if (resumeDecision.error !== undefined) record.error = resumeDecision.error;
         record.result = text;
         record.completedAt ??= Date.now();
         settle();
         return text;
       })
       .catch((err) => {
-        if (record.status !== "stopped") {
-          record.status = "error";
-          record.error = err instanceof Error ? err.message : String(err);
-        }
+        const resumeDecision = reduceSettle({
+          kind: "rejected",
+          stopped: record.status === "stopped",
+          error: err instanceof Error ? err.message : String(err),
+          keepErrorWhenStopped: false,
+        });
+        record.status = resumeDecision.status;
+        if (resumeDecision.error !== undefined) record.error = resumeDecision.error;
         record.completedAt ??= Date.now();
         settle();
         return "";
