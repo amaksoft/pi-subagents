@@ -188,7 +188,7 @@ export interface AgentRecord {
    * a record whose currentTool started long ago with no end is exactly what
    * "stuck" looks like from the outside (e.g. bash hung on blocked net).
    */
-  currentTool?: { name: string; startedAt: number };
+  currentTool?: { name: string; startedAt: number; callId?: string };
   /**
    * Last observable output: streamed text or tool stdout delta. A tool run
    * with recent output is working (build progressing); one silent since
@@ -252,7 +252,7 @@ export interface AgentRecord {
   /** Worktree info if the agent is running in an isolated worktree. */
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */
-  worktreeResult?: { hasChanges: boolean; branch?: string };
+  worktreeResult?: { hasChanges: boolean; branch?: string; path?: string; error?: string };
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;
   /** Path to the streaming output transcript file. */

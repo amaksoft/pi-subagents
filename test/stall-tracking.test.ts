@@ -247,3 +247,68 @@ describe("thinking activity", () => {
     expect(record.currentTool?.name).toBe("bash");
   });
 });
+
+describe("callId-matched tool tracking", () => {
+  it("parallel same-tool calls resolve independently", async () => {
+    const { trackToolActivity } = await import("../src/status-note.js");
+    const record = { toolUses: 0, lastActivityAt: 0 } as any;
+    trackToolActivity(record, { type: "start", toolName: "bash", callId: "c1" });
+    record.liveOutput = "building…";
+    trackToolActivity(record, { type: "start", toolName: "bash", callId: "c2" });
+    expect(record.currentTool).toMatchObject({ name: "bash", callId: "c2" });
+    // First call ends: sibling survives with slot and tail intact.
+    trackToolActivity(record, { type: "end", toolName: "bash", callId: "c1" });
+    expect(record.currentTool).toMatchObject({ name: "bash", callId: "c2" });
+    expect(record.liveOutput).toContain("building…");
+    expect(record.toolUses).toBe(1);
+    // Second call ends: slot and tail clear.
+    trackToolActivity(record, { type: "end", toolName: "bash", callId: "c2" });
+    expect(record.currentTool).toBeUndefined();
+    expect(record.liveOutput).toBeUndefined();
+    expect(record.toolUses).toBe(2);
+  });
+
+  it("falls back to name matching without callIds (legacy/stub events)", async () => {
+    const { trackToolActivity } = await import("../src/status-note.js");
+    const record = { toolUses: 0, lastActivityAt: 0 } as any;
+    trackToolActivity(record, { type: "start", toolName: "bash" });
+    trackToolActivity(record, { type: "end", toolName: "bash" });
+    expect(record.currentTool).toBeUndefined();
+    expect(record.toolUses).toBe(1);
+  });
+
+  it("an unrelated end never clears the tracked call", async () => {
+    const { trackToolActivity } = await import("../src/status-note.js");
+    const record = { toolUses: 0, lastActivityAt: 0 } as any;
+    trackToolActivity(record, { type: "start", toolName: "bash", callId: "c1" });
+    trackToolActivity(record, { type: "end", toolName: "read", callId: "c9" });
+    expect(record.currentTool).toMatchObject({ name: "bash", callId: "c1" });
+    expect(record.toolUses).toBe(1);
+  });
+});
+
+describe("threshold-threading", () => {
+  it("display paths agree with a custom enforcement threshold", async () => {
+    const { describeStall, isStalled } = await import("../src/status-note.js");
+    const { describeFleetActivity } = await import("../src/ui/fleet-list.js");
+    const { countStalledAgents } = await import("../src/ui/workflow-card.js");
+    const now = Date.now();
+    const record = {
+      status: "running",
+      lastActivityAt: now - 6 * 60_000,
+      currentTool: { name: "bash", startedAt: now - 6 * 60_000 },
+    } as any;
+    // Default 10min: silent 6min is live everywhere…
+    expect(isStalled(record, now)).toBe(false);
+    expect(describeStall(record, now)).toBeUndefined();
+    expect(describeFleetActivity(record, now)).toContain("▸ bash");
+    // …custom 5min: stalled everywhere, identically.
+    expect(isStalled(record, now, 5 * 60_000)).toBe(true);
+    expect(describeStall(record, now, 5 * 60_000)).toBe("stalled 6m in bash");
+    expect(describeFleetActivity(record, now, 5 * 60_000)).toBe("stalled 6m in bash");
+    const entries = [{ type: "workflow_agent", index: 0, recordId: "r1" }] as any;
+    const getRecord = () => record;
+    expect(countStalledAgents(entries, getRecord, now)).toBe(0);
+    expect(countStalledAgents(entries, getRecord, now, 5 * 60_000)).toBe(1);
+  });
+});

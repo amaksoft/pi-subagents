@@ -388,6 +388,34 @@ describe("cleanupWorktree — failure path", () => {
     rmSync(repoDir, { recursive: true, force: true });
   });
 
+  it("preserves the copy and reports error (never clean) when commit fails", async () => {
+    const wt = (await createWorktree(pi, repoDir, "fail-commit"))!;
+    writeFileSync(join(wt.path, "new-file.txt"), "agent wrote this");
+    const bad = failingPi((args) => args[0] === "commit", { code: 1, killed: false });
+
+    const result = await cleanupWorktree(bad, repoDir, wt, "commit fails");
+    expect(result.hasChanges).toBe(true);
+    expect(result.branch).toBeUndefined();
+    expect(result.error).toMatch(/commit/);
+    // Preserved for recovery, not removed.
+    expect(existsSync(wt.path)).toBe(true);
+    // The stranded file is still there.
+    expect(existsSync(join(wt.path, "new-file.txt"))).toBe(true);
+    // Tidy up: force-remove so the temp repo does not leak.
+    execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: repoDir, stdio: "pipe" });
+  });
+
+  it("preserves the copy when status itself fails", async () => {
+    const wt = (await createWorktree(pi, repoDir, "fail-status"))!;
+    const bad = failingPi((args) => args[0] === "status", { code: 128, killed: false });
+
+    const result = await cleanupWorktree(bad, repoDir, wt, "status fails");
+    expect(result.hasChanges).toBe(true);
+    expect(result.error).toBeDefined();
+    expect(existsSync(wt.path)).toBe(true);
+    execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: repoDir, stdio: "pipe" });
+  });
+
   it("short-circuits when the worktree directory is already gone", async () => {
     // Hits the existsSync guard at the top of cleanupWorktree, not the outer
     // catch — cleanup can be called twice (settle path plus dispose), so it has
@@ -402,12 +430,13 @@ describe("cleanupWorktree — failure path", () => {
     expect(result.branch).toBeUndefined();
   });
 
-  it("swallows a git failure inside a still-present worktree and reports no changes", async () => {
-    // The outer catch. The directory exists — so the existsSync guard above
-    // does not fire — but git cannot operate in it, which is what a corrupted
-    // or externally-detached worktree looks like. The agent's work is lost
-    // either way; what matters is that cleanup does not reject out of the
-    // manager's settle path and take the whole record down with it.
+  it("preserves the copy and reports error when git cannot operate in a present worktree", async () => {
+    // The directory exists — so the existsSync guard above does not fire —
+    // but git cannot operate in it, which is what a corrupted or
+    // externally-detached worktree looks like. Cleanup must still not reject
+    // out of the manager's settle path — but "no changes" would strand the
+    // agent's work while reporting success, so failure reports loudly and
+    // keeps the copy.
     const wt = (await createWorktree(pi, repoDir, "corrupt"))!;
     writeFileSync(join(wt.path, "work.txt"), "agent output");
     // Break the worktree's link back to the repo.
@@ -415,13 +444,19 @@ describe("cleanupWorktree — failure path", () => {
 
     const result = await cleanupWorktree(pi, repoDir, wt, "corrupted agent");
 
-    expect(result.hasChanges).toBe(false);
+    expect(result.hasChanges).toBe(true);
     expect(result.branch).toBeUndefined();
+    expect(result.error).toMatch(/status/);
+    expect(existsSync(wt.path)).toBe(true);
+    expect(existsSync(join(wt.path, "work.txt"))).toBe(true);
+    // rmSync, not git: the corrupted .git link defeats git worktree remove.
+    rmSync(wt.path, { recursive: true, force: true });
   });
 
-  it("reports no changes when the preservation commit fails", async () => {
+  it("reports error (never clean) when the preservation commit fails", async () => {
     // `git commit` failing resolves with a non-zero code rather than throwing,
-    // so the outer catch is only reached if the result is inspected.
+    // so the outer catch is only reached if the result is inspected (which
+    // git() does) — and then it must preserve and report, not swallow.
     const wt = (await createWorktree(pi, repoDir, "commit-fails"))!;
     writeFileSync(join(wt.path, "work.txt"), "agent output");
 
@@ -432,8 +467,11 @@ describe("cleanupWorktree — failure path", () => {
       "commit fails",
     );
 
-    expect(result.hasChanges).toBe(false);
+    expect(result.hasChanges).toBe(true);
     expect(result.branch).toBeUndefined();
+    expect(result.error).toMatch(/commit/);
+    expect(existsSync(wt.path)).toBe(true);
+    execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: repoDir, stdio: "pipe" });
   });
 
   it("creates the branch BEFORE removing the worktree, so a removal failure cannot lose commits", async () => {
@@ -499,3 +537,4 @@ describe("worktree isolation switch", () => {
     }
   });
 });
+

@@ -485,7 +485,7 @@ Stop a running or queued top-level agent — the kill switch for stuck, looping,
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID (or `@handle`) to stop |
+| `agent_id` | string | yes | Agent ID (or bare handle, no `@` — `@` lives only in prompt mentions) to stop |
 
 > **Migration note for tool policies:** `stop_subagent` (top-level and nested) is a new tool name. If you gate tools by name (`disallowed_tools`, extension allowlists), add it alongside `Agent` / `get_subagent_result` / `steer_subagent` — pre-existing lists won't cover it. It is strictly less privileged than spawning: it can only stop agents, and the nested one only the parent's own children.
 

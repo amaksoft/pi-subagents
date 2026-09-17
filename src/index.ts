@@ -36,7 +36,7 @@ import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, ses
 import { runResumeFiltered, toResumeSession } from "./resume-filtered.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, GRACE_TURNS_CEILING, loadSettings, MAX_CONCURRENT_CEILING, MAX_TURNS_CEILING, SUBAGENT_DEPTH_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { describeStall, describeToolActivity, getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
@@ -657,7 +657,7 @@ export default function (pi: ExtensionAPI) {
     // flags the agent, re-armed by any later heartbeat. Nested/workflow
     // children report through their owner, like every other lifecycle event.
     if (!isTopLevelAgent(record)) return;
-    const diagnosis = describeStall(record) ?? "stalled";
+    const diagnosis = describeStall(record, Date.now(), manager.getStallThresholdMs()) ?? "stalled";
     pi.events.emit("subagents:stalled", buildEventData(record));
     const footer = record.outputFile ? `\nPartial transcript so far: ${record.outputFile}` : "";
     pi.sendMessage({
@@ -1159,7 +1159,9 @@ export default function (pi: ExtensionAPI) {
   // The last two arguments keep a conversation overlay opened here identical to
   // one opened from `/agents`: same setting on the way in, same persist out.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
-    (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined));
+    (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
+    // Live read: stall display rows must agree with the sweep's threshold.
+    () => manager.getStallThresholdMs());
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -2369,7 +2371,7 @@ Terse command-style prompts produce shallow, generic work.
       startedAt: task.startTime,
       ...(task.endTime !== undefined ? { completedAt: task.endTime } : {}),
       tokens: task.totalTokens,
-      stalledCount: countStalledAgents(task.workflowProgress, (id) => manager.getRecord(id)),
+      stalledCount: countStalledAgents(task.workflowProgress, (id) => manager.getRecord(id), Date.now(), manager.getStallThresholdMs()),
     }));
   }
 
@@ -2537,7 +2539,7 @@ Terse command-style prompts produce shallow, generic work.
           agentCount: task.agentCount,
           totalTokens: task.totalTokens,
           // One-shot snapshot for a static result (the dialog stays live).
-          stalledCount: countStalledAgents(task.workflowProgress, (id) => manager.getRecord(id)),
+          stalledCount: countStalledAgents(task.workflowProgress, (id) => manager.getRecord(id), Date.now(), manager.getStallThresholdMs()),
         },
         theme,
       );
@@ -2859,7 +2861,7 @@ Terse command-style prompts produce shallow, generic work.
         // Judge fuel: what tool, how long, when it last produced output, and
         // the bounded live tail — a moving tail means working, a stale one
         // means wedged or fruitless. Without this a hung agent is a black box.
-        const stall = describeStall(record);
+        const stall = describeStall(record, Date.now(), manager.getStallThresholdMs());
         const activity = describeToolActivity(record);
         const where = stall
           ? `${stall}. Consider stop_subagent if the task is time-sensitive — partial output is readable via get_subagent_result after the stop.`
@@ -3860,17 +3862,19 @@ Write the file using the write tool. Only write the file, nothing else.`;
       ];
     }
 
+    // Menu-typed numbers pass through the same ceilings as subagents.json:
+    // without them a typo bypasses the sanitize() policy the file enjoys.
     function applyValue(id: string, value: string) {
       if (id === "maxConcurrent") {
         const n = parseInt(value, 10);
-        if (n >= 1) {
+        if (n >= 1 && n <= MAX_CONCURRENT_CEILING) {
           manager.setMaxConcurrent(n);
           notifyApplied(ctx, `Max concurrency set to ${n}`);
         }
       } else if (id === "maxConcurrentForeground") {
         // 0 is meaningful here, unlike maxConcurrent above: it means unlimited.
         const n = parseInt(value, 10);
-        if (n >= 0) {
+        if (n >= 0 && n <= MAX_CONCURRENT_CEILING) {
           manager.setMaxConcurrentForeground(n);
           notifyApplied(ctx, n === 0
             ? "Max foreground concurrency set to unlimited"
@@ -3881,19 +3885,19 @@ Write the file using the write tool. Only write the file, nothing else.`;
         if (n === 0) {
           setDefaultMaxTurns(undefined);
           notifyApplied(ctx, "Default max turns set to unlimited");
-        } else if (n >= 1) {
+        } else if (n >= 1 && n <= MAX_TURNS_CEILING) {
           setDefaultMaxTurns(n);
           notifyApplied(ctx, `Default max turns set to ${n}`);
         }
       } else if (id === "graceTurns") {
         const n = parseInt(value, 10);
-        if (n >= 1) {
+        if (n >= 1 && n <= GRACE_TURNS_CEILING) {
           setGraceTurns(n);
           notifyApplied(ctx, `Grace turns set to ${n}`);
         }
       } else if (id === "maxSubagentDepth") {
         const n = parseInt(value, 10);
-        if (n >= 0) {
+        if (n >= 0 && n <= SUBAGENT_DEPTH_CEILING) {
           setMaxSubagentDepth(n);
           notifyApplied(
             ctx,
@@ -3953,12 +3957,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
         setDisableDefaultAgents(enabled);
         notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
       } else if (id === "fallbackSubagent") {
-        setFallbackSubagent(value);
+        const fallback = value.trim() || undefined;
+        setFallbackSubagent(fallback);
         notifyApplied(
           ctx,
-          value === NO_FALLBACK
+          fallback === undefined || fallback === NO_FALLBACK
             ? "Unknown or disabled agent types will now be rejected"
-            : `Unknown agent types will fall back to ${value}`,
+            : `Unknown agent types will fall back to ${fallback}`,
         );
       } else if (id === "outputTranscript") {
         const enabled = value === "on";
@@ -4227,6 +4232,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
   const workflowMenuDeps: WorkflowMenuDeps = {
     tasks: workflowTasks,
     getRecord: id => manager.getRecord(id),
+    getStallThresholdMs: () => manager.getStallThresholdMs(),
     viewAgentConversation,
     // Read lazily: `currentCtx` is rebound on every session_start, and the
     // fleet list may act between sessions, when there is none.

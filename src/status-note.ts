@@ -32,6 +32,7 @@ export const DEFAULT_STALL_THRESHOLD_MS = 10 * 60_000;
 export interface ToolActivityLike {
   type: "start" | "end";
   toolName: string;
+  callId?: string;
 }
 
 /**
@@ -45,16 +46,22 @@ export function trackToolActivity(
 ): void {
   const now = Date.now();
   if (activity.type === "start") {
-    // Latest wins: parallel same-tool calls share one slot (documented
-    // residual — see below), sequential calls always describe the newest.
-    record.currentTool = { name: activity.toolName, startedAt: now };
+    // Latest wins the display slot; the callId pins the end-match below.
+    record.currentTool = { name: activity.toolName, startedAt: now, callId: activity.callId };
     // Acting ends reasoning: the model stopped thinking and started doing.
     record.reasoningSince = undefined;
   } else {
-    // Clear only when the ending call is the tracked one: with parallel
-    // calls (start A, start B, end A) an unconditional clear would wipe B
-    // and its tail while it is still running.
-    if (record.currentTool?.name === activity.toolName) {
+    // Clear only when the ending call is the tracked one. With callIds this
+    // is exact (bash#1 ends while bash#2 runs: slot and tail survive); without
+    // them (older sessions, stubbed events) it falls back to name matching,
+    // the pre-callId behavior.
+    const tracked = record.currentTool;
+    const sameCall = tracked?.callId !== undefined
+      && activity.callId !== undefined
+      && tracked.callId === activity.callId;
+    const sameName = (tracked?.callId === undefined || activity.callId === undefined)
+      && tracked?.name === activity.toolName;
+    if (tracked && (sameCall || sameName)) {
       record.currentTool = undefined;
       // The tail describes the finished call — a new call starts blank.
       record.liveOutput = undefined;

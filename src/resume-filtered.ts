@@ -14,7 +14,7 @@
  */
 
 import type { SessionInfo } from "@earendil-works/pi-coding-agent";
-import { attachExternalParents, buildSessionTree, groupIdenticalRoots, type SessionTreeNode } from "./session-tree.js";
+import { attachExternalParents, buildSessionTree, groupIdenticalRoots, sanitizeRowText, type SessionTreeNode } from "./session-tree.js";
 import { selectItem } from "./ui/select-item.js";
 
 /** Minimal session shape this needs (structural subset of SessionInfo). */
@@ -70,7 +70,7 @@ export function formatResumeAge(ms: number): string {
 
 /** Row text: name (or first message) plus message count and age. */
 export function formatResumeRow(session: ResumeSession, now = Date.now(), currentFile?: string): string {
-  const text = (session.name?.trim() || session.firstMessage).replace(/\s+/g, " ").trim().slice(0, 80) || "(empty session)";
+  const text = sanitizeRowText(session.name?.trim() || session.firstMessage) || "(empty session)";
   const age = formatResumeAge(now - session.modified.getTime());
   const current = currentFile !== undefined && session.path === currentFile ? " · current" : "";
   return `${text} · ${session.messageCount} msgs · ${age}${current}`;

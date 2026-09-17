@@ -15,7 +15,7 @@
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
-import { describeStall, isStoppableStatus } from "../status-note.js";
+import { DEFAULT_STALL_THRESHOLD_MS, describeStall, isStoppableStatus } from "../status-note.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
@@ -89,14 +89,18 @@ export function formatActivityAge(ms: number): string {
  * current tool and its elapsed time. Finished agents show nothing (their
  * clock is frozen in the main stats). Undefined when there is nothing to say.
  */
-export function describeFleetActivity(record: AgentRecord): string | undefined {
+export function describeFleetActivity(
+  record: AgentRecord,
+  now = Date.now(),
+  thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
+): string | undefined {
   if (record.status !== "running" && record.status !== "queued") return undefined;
   // Every heartbeat clears stalledSince, so a set flag always means silence
   // since the sweep ran — no stale-flag case to handle here.
-  const stall = describeStall(record);
+  const stall = describeStall(record, now, thresholdMs);
   if (stall) return stall;
   if (record.currentTool) {
-    return `▸ ${record.currentTool.name} ${formatActivityAge(Date.now() - record.currentTool.startedAt)}`;
+    return `▸ ${record.currentTool.name} ${formatActivityAge(now - record.currentTool.startedAt)}`;
   }
   return undefined;
 }
@@ -173,6 +177,11 @@ export class FleetList {
      * point. Omitted → `m` still cycles, viewer-locally.
      */
     private onViewerMarkdown?: (mode: ViewerMarkdownMode) => void,
+    /**
+     * Stall silence threshold, read live at render time like showCost —
+     * display paths must agree with the sweep's enforcement threshold.
+     */
+    private getStallThresholdMs: () => number = () => DEFAULT_STALL_THRESHOLD_MS,
   ) {}
 
   // ---- Lifecycle ----
@@ -633,7 +642,7 @@ export class FleetList {
     const tokens = getLifetimeTotal(record.lifetimeUsage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const cost = this.showCost() ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
-    const activity = describeFleetActivity(record);
+    const activity = describeFleetActivity(record, Date.now(), this.getStallThresholdMs());
     const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}${activity ? ` · ${activity}` : ""}`;
     const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
     return rightAlign(left, right, width);

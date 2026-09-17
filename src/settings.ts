@@ -362,10 +362,10 @@ const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>
 // Sanity ceilings — prevent hand-edited configs from asking for values that
 // make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
 // that any realistic power-user setting passes through.
-const MAX_CONCURRENT_CEILING = 1024;
-const MAX_TURNS_CEILING = 10_000;
-const GRACE_TURNS_CEILING = 1_000;
-const SUBAGENT_DEPTH_CEILING = 16;
+export const MAX_CONCURRENT_CEILING = 1024;
+export const MAX_TURNS_CEILING = 10_000;
+export const GRACE_TURNS_CEILING = 1_000;
+export const SUBAGENT_DEPTH_CEILING = 16;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {

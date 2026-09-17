@@ -32,7 +32,7 @@
  */
 
 import { stripTerminalSequences, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { describeStall, isStalled } from "../status-note.js";
+import { DEFAULT_STALL_THRESHOLD_MS, describeStall, isStalled } from "../status-note.js";
 import type { AgentRecord } from "../types.js";
 import type { WorkflowEntryData } from "../workflow/entry.js";
 import type { WorkflowMeta } from "../workflow/meta.js";
@@ -310,12 +310,13 @@ export function countStalledAgents(
   entries: readonly WorkflowEntry[],
   getRecord: (recordId: string) => AgentRecord | undefined,
   now = Date.now(),
+  thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
 ): number {
   let count = 0;
   for (const entry of entries) {
     if (entry.type !== "workflow_agent" || !entry.recordId) continue;
     const record = getRecord(entry.recordId);
-    if (record && isStalled(record, now)) count++;
+    if (record && isStalled(record, now, thresholdMs)) count++;
   }
   return count;
 }
@@ -324,10 +325,11 @@ export function countStalledAgents(
 export function stallAnnotation(
   entry: WorkflowAgentEntry,
   getRecord: ((recordId: string) => AgentRecord | undefined) | undefined,
+  thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
 ): string | undefined {
   if (!getRecord || !entry.recordId) return undefined;
   const record = getRecord(entry.recordId);
-  return record ? describeStall(record) : undefined;
+  return record ? describeStall(record, Date.now(), thresholdMs) : undefined;
 }
 
 /**

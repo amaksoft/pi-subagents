@@ -318,3 +318,46 @@ describe("attachExternalParents", () => {
     expect(attachExternalParents(roots, () => undefined)).toBe(roots);
   });
 });
+
+describe("picker hardening (round-2 minors)", () => {
+  it("sanitizes ANSI/control sequences out of row text", async () => {
+    const { sanitizeRowText } = await import("../src/session-tree.js");
+    expect(sanitizeRowText("ok \x1b[2Jwiped\x1b[0m text")).toBe("ok wiped text");
+    expect(sanitizeRowText("a\x00b\x07c")).toBe("a b c");
+    expect(sanitizeRowText("x".repeat(200)).length).toBeLessThanOrEqual(80);
+    expect(sanitizeRowText("  spaced   out  ")).toBe("spaced out");
+  });
+
+  it("Enter on an empty filter result is a no-op, not a silent cancel", () => {
+    const { ui, done } = picker(buildSessionTree([session({ path: "/s/a.jsonl", name: "alpha" })]));
+    for (const ch of "zzz-no-match") ui.handleInput(ch);
+    expect(ui.render(100).join("\n")).toContain("No matches");
+    ui.handleInput(ENTER);
+    expect(done).not.toHaveBeenCalled();
+    ui.handleInput(ESC);
+    ui.handleInput(ESC);
+    expect(done).toHaveBeenCalledWith(undefined);
+  });
+
+  it("Enter expands a group row even while filtering", async () => {
+    const { groupIdenticalRoots } = await import("../src/session-tree.js");
+    const a = session({ path: "/s/a.jsonl", firstMessage: "probe xyz" });
+    const b = session({ path: "/s/b.jsonl", firstMessage: "probe xyz" });
+    const { ui, done } = picker(groupIdenticalRoots(buildSessionTree([a, b])));
+    for (const ch of "probe") ui.handleInput(ch);
+    ui.handleInput(ENTER); // group row: expands, does not resolve
+    expect(done).not.toHaveBeenCalled();
+    const lines = ui.render(100).join("\n");
+    expect(lines.match(/probe xyz/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("rows fit the render width", async () => {
+    const { visibleWidth } = await import("@earendil-works/pi-tui");
+    const s = session({ path: "/s/a.jsonl", name: "n".repeat(150), firstMessage: "m".repeat(150) });
+    const { ui } = picker(buildSessionTree([s]));
+    // Display width, not string length: wide glyphs (→, ·) count double.
+    for (const line of ui.render(40)) {
+      expect(visibleWidth(line)).toBeLessThanOrEqual(40);
+    }
+  });
+});

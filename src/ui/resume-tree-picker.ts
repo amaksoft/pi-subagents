@@ -12,9 +12,9 @@
  * Space toggle · Enter resume · Esc clear-filter-then-cancel · type to filter.
  */
 
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { formatResumeRow } from "../resume-filtered.js";
-import { type SessionTreeNode, searchRows, type TreeRow, toggleExpanded, visibleRows } from "../session-tree.js";
+import { type SessionTreeNode, sanitizeRowText, searchRows, type TreeRow, toggleExpanded, visibleRows } from "../session-tree.js";
 
 /** Minimal theme surface (real theme in prod, identity fns in tests). */
 export interface ResumeTreeTheme {
@@ -99,12 +99,11 @@ export function createResumeTreePicker(
         if (below > 0) lines.push(theme.fg("dim", `  ↓ ${below} more`));
         lines.push(theme.fg("dim", `  (${selected + 1}/${rs.length})`));
       }
-      if (filter) lines.push(theme.fg("dim", `  Filter: ${filter}`));
+      if (filter) lines.push(theme.fg("dim", `  Filter: ${sanitizeRowText(filter, 40)}`));
       lines.push(
-        theme.fg("dim", "  ↑↓ navigate · → expand · ← collapse · Space toggle · Enter resume · Esc cancel · type to filter"),
+        theme.fg("dim", "  ↑↓ navigate · → expand · ← collapse · Space toggle · Enter resume · Esc clear-filter/cancel · type to filter"),
       );
-      void width;
-      return lines;
+      return lines.map(line => truncateToWidth(line, Math.max(20, width), "…"));
     },
 
     invalidate() {},
@@ -130,7 +129,12 @@ export function createResumeTreePicker(
         const row = rs[selected];
         if (row?.isParent) expanded = toggleExpanded(expanded, row.session.path);
       } else if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
-        const row = rows()[selected];
+        const rs = rows();
+        // Empty list (filter matched nothing): no-op — the "No matches"
+        // line already says so, and resolving undefined would silently
+        // cancel a picker the user is still narrowing.
+        if (rs.length === 0) return;
+        const row = rs[selected];
         // Group rows expand instead of resuming: the pseudo-path is shared by
         // all members, so there is nothing unambiguous to switch to.
         if (row?.isGroup) {

@@ -961,6 +961,11 @@ export class AgentManager {
             // what a human reads, so the note still belongs on it.
             record.result = (record.result ?? "") +
               `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+          } else if (wtResult.error) {
+            // Cleanup failed mid-flight: the copy is preserved (see path) and
+            // the parent must know the work is stranded, not merged.
+            record.result = (record.result ?? "") +
+              `\n\n---\nWorktree cleanup failed (${wtResult.error}); uncommitted work preserved at \`${wtResult.path ?? "unknown path"}\`.`;
           }
         }
 
@@ -1408,6 +1413,9 @@ export class AgentManager {
         touchActivity(record);
       },
       onAssistantUsage: (usage) => {
+        // Heartbeat like every other resume path: usage without text or
+        // tools is still proof of life (empty/error turns carry usage).
+        touchActivity(record);
         addUsage(record.lifetimeUsage, usage);
         this.onUsage?.(record, usage);
         options.onAssistantUsage?.(usage);
@@ -1699,11 +1707,21 @@ export class AgentManager {
     try {
       this.onStall?.(record);
     } catch { /* ignore stall side-effect errors */ }
+    // Re-read after the callback: it runs host code that may have snoozed
+    // the record, settled it, or otherwise changed what we checked above.
+    // An abort decided on stale state could kill a run the callback just
+    // saved — the exact hazard snooze exists to prevent.
     // Top-level only — the same ownership boundary stop_subagent enforces.
     // Nested children belong to their parent agent, workflow children to
     // their run (which has its own budget + skip/retry controls); killing
     // either from a global sweep would break a plan the sweeper cannot see.
-    if (this.stallAutoAbort && record.status === "running" && isTopLevelAgent(record)) {
+    if (
+      this.stallAutoAbort
+      && record.status === "running"
+      && record.stalledSince !== undefined
+      && isTopLevelAgent(record)
+      && isStalled(record, now, this.stallThresholdMs)
+    ) {
       this.abort(id);
     }
   }

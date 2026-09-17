@@ -173,6 +173,22 @@ export function scopeLabel(sessionPath: string): string {
   return m ? m[1] : "another scope";
 }
 
+/**
+ * Strip ANSI escapes, C0/C1 controls and DEL from session-sourced text
+ * before it reaches picker rows: names and first messages are model- and
+ * file-authored, and a raw ESC `[2J` in a row would rewrite the reader's
+ * terminal. Truncates to a picker-safe width.
+ */
+export function sanitizeRowText(text: string, maxLen = 80): string {
+  return text
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLen);
+}
+
 /** Normalized first user message — the duplicate-grouping key. */
 export function firstMessageKey(session: ResumeSession): string {
   return session.firstMessage.replace(/\s+/g, " ").trim();

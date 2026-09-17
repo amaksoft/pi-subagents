@@ -394,6 +394,8 @@ export function resolveDefaultModel(
 export interface ToolActivity {
   type: "start" | "end";
   toolName: string;
+  /** Core's per-call id, when the session event carries one. Matches an end to its start. */
+  callId?: string;
 }
 
 /**
@@ -1154,10 +1156,10 @@ export async function runAgent(
       options.onThinkingActivity?.("end");
     }
     if (event.type === "tool_execution_start") {
-      options.onToolActivity?.({ type: "start", toolName: event.toolName });
+      options.onToolActivity?.({ type: "start", toolName: event.toolName, callId: event.toolCallId });
     }
     if (event.type === "tool_execution_end") {
-      options.onToolActivity?.({ type: "end", toolName: event.toolName });
+      options.onToolActivity?.({ type: "end", toolName: event.toolName, callId: event.toolCallId });
     }
     // Live stdout while a tool runs: bounded tail + timestamp downstream.
     if (event.type === "bash_execution_update") {
@@ -1257,8 +1259,8 @@ export async function resumeAgent(
 
   const unsubEvents = (options.onToolActivity || options.onToolOutput || options.onThinkingActivity || options.onAssistantUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
-        if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
-        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
+        if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName, callId: event.toolCallId });
+        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName, callId: event.toolCallId });
         if (event.type === "bash_execution_update") options.onToolOutput?.(event.delta);
         if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
           options.onThinkingActivity?.("delta");

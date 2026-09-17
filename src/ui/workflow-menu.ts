@@ -29,6 +29,8 @@ export interface WorkflowMenuDeps {
   tasks: ReadonlyMap<string, WorkflowTask>;
   /** The record behind an agent id, or undefined once it has been swept. */
   getRecord(id: string): AgentRecord | undefined;
+  /** Stall threshold for annotations/counts — live read so UI agrees with enforcement. */
+  getStallThresholdMs(): number;
   /** The conversation overlay `c` opens on an agent row. */
   viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord): Promise<void>;
   /**
@@ -87,6 +89,7 @@ export async function showWorkflowDialog(
           meta: task.meta,
           agentCount: task.agentCount,
           getAgentRecord: (recordId: string) => deps.getRecord(recordId),
+          stallThresholdMs: deps.getStallThresholdMs(),
         }),
         theme,
         done,

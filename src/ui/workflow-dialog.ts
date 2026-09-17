@@ -300,6 +300,11 @@ export interface WorkflowDialogInput extends WorkflowDialogSource {
    */
   getAgentRecord?: (recordId: string) => AgentRecord | undefined;
   /**
+   * Stall threshold the annotations/counts agree with. Absent → default —
+   * tests and read-only callers keep the historical look.
+   */
+  stallThresholdMs?: number;
+  /**
    * Which actions the caller actually wired. Absent keys default to available,
    * so layout tests and read-only callers keep the full footer; a caller that
    * wires only some actions passes the map so the hints stay truthful.
@@ -646,6 +651,7 @@ function agentRow(options: {
   spinnerFrame: number;
   now: number;
   getAgentRecord?: (recordId: string) => AgentRecord | undefined;
+  stallThresholdMs?: number;
 }): WorkflowCardLine {
   const { entry, selected, glyphs, width } = options;
   const display = displayState(entry, options.workflowActive);
@@ -663,7 +669,7 @@ function agentRow(options: {
 
   const model = formatModel(entry);
   if (model) head.push({ text: ` ${model}`, color: "dim" });
-  const stall = stallAnnotation(entry, options.getAgentRecord);
+  const stall = stallAnnotation(entry, options.getAgentRecord, options.stallThresholdMs);
   for (const part of [...subStatusAnnotations(entry, display, options.now, stall), ...rowStatSegments(entry)]) {
     head.push({ text: " · ", color: "dim" }, { text: part, color: "dim" });
   }
@@ -703,7 +709,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   // ---- Header: the run's name, then its description with the stats flush right.
   // Stalled children counted live per render (absent lookup = 0, today's look).
   const stalledCount = input.getAgentRecord
-    ? countStalledAgents(input.progress, input.getAgentRecord, now)
+    ? countStalledAgents(input.progress, input.getAgentRecord, now, input.stallThresholdMs)
     : 0;
   const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, now, stalledCount);
   lines.push(clampLine([{ text: " " }, { text: head.name, color: "toolTitle", bold: true }], width));
@@ -776,6 +782,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
           spinnerFrame,
           now,
           getAgentRecord: input.getAgentRecord,
+          stallThresholdMs: input.stallThresholdMs,
         }),
       );
     }

@@ -208,3 +208,21 @@ describe("workflow wall-clock budget", () => {
     expect(activeElapsedMs(task, 11_000)).toBe(6_000);
   });
 });
+
+describe("workflow budget overflow guard", () => {
+
+  it("huge timeoutMs clamps instead of overflowing setTimeout", async () => {
+    const { createWorkflowTask, armWorkflowTimeout, disarmWorkflowTimeout } = await import(
+      "../src/workflow/task.js"
+    );
+    const task = createWorkflowTask({ id: "wf_overflow", script: "", startTime: Date.now() });
+    task.timeoutMs = 10 ** 15; // ~31M years: would overflow to ~1ms unclamped
+    let fired = 0;
+    armWorkflowTimeout(task, () => { fired++; });
+    expect(task.timeoutTimer).toBeDefined();
+    await new Promise(r => setTimeout(r, 50));
+    expect(fired).toBe(0);
+    expect(task.timeoutFired).toBeUndefined();
+    disarmWorkflowTimeout(task);
+  });
+});

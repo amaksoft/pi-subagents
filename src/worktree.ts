@@ -53,12 +53,18 @@ export function isWorktreeIsolationEnabled(): boolean {
 }
 
 export interface WorktreeCleanupResult {
-  /** Whether changes were found in the worktree. */
+  /**
+   * Whether changes were found in the worktree. True on any cleanup failure:
+   * "no changes" means verified-clean, never "cleanup gave up" — the copy
+   * is preserved in that case (see path) so work is never silently lost.
+   */
   hasChanges: boolean;
   /** Branch name if changes were committed. */
   branch?: string;
   /** Worktree path if it was kept. */
   path?: string;
+  /** Which step failed, when hasChanges is true without a branch. */
+  error?: string;
 }
 
 /**
@@ -132,22 +138,29 @@ export async function cleanupWorktree(
     return { hasChanges: false };
   }
 
+  // Step label for the catch below: the error must name WHERE cleanup
+  // failed, not just repeat git's stderr ("boom" explains nothing).
+  let step = "status";
   try {
     // Check for uncommitted changes in the worktree
     const status = await git(pi, worktree.path, ["status", "--porcelain"], 10000);
 
     if (status) {
       // Changes exist — stage, commit, and create a branch
+      step = "add";
       await git(pi, worktree.path, ["add", "-A"], 10000);
       // Truncate description for commit message (no shell sanitization needed — pi.exec uses argv)
       const safeDesc = agentDescription.slice(0, 200);
       const commitMsg = `pi-agent: ${safeDesc}`;
+      step = "commit";
       await git(pi, worktree.path, ["commit", "--no-verify", "-m", commitMsg], 10000);
     } else {
+      step = "rev-parse";
       const currentSha = await git(pi, worktree.path, ["rev-parse", "HEAD"], 5000);
 
       if (currentSha === worktree.baseSha) {
         // No changes — remove worktree
+        step = "remove";
         await removeWorktree(pi, cwd, worktree.path);
         return { hasChanges: false };
       }
@@ -156,6 +169,7 @@ export async function cleanupWorktree(
     // Create a branch pointing to the worktree's HEAD.
     // If the branch already exists, append a suffix to avoid overwriting previous work.
     let branchName = worktree.branch;
+    step = "branch";
     try {
       await git(pi, worktree.path, ["branch", branchName], 5000);
     } catch {
@@ -174,10 +188,14 @@ export async function cleanupWorktree(
       branch: worktree.branch,
       path: worktree.path,
     };
-  } catch {
-    // Best effort cleanup on error
-    try { await removeWorktree(pi, cwd, worktree.path); } catch { /* ignore */ }
-    return { hasChanges: false };
+  } catch (err) {
+    // Never report clean on failure, and never remove what we could not
+    // verify: the copy stays on disk for recovery, and the error names the
+    // step so the parent can say where the work is, not just that it failed.
+    const detail = err instanceof Error ? err.message : String(err);
+    const error = `${step}: ${detail}`;
+    console.warn(`[pi-subagents] worktree cleanup failed, preserving ${worktree.path}: ${error}`);
+    return { hasChanges: true, path: worktree.path, error };
   }
 }
 
@@ -187,11 +205,15 @@ export async function cleanupWorktree(
 async function removeWorktree(pi: ExtensionAPI, cwd: string, worktreePath: string): Promise<void> {
   try {
     await git(pi, cwd, ["worktree", "remove", "--force", worktreePath], 10000);
-  } catch {
-    // If git worktree remove fails, try pruning
+  } catch (err) {
+    // If git worktree remove fails, try pruning — and say so either way, so
+    // a stranded copy is diagnosable instead of silently accumulating.
+    console.warn(`[pi-subagents] worktree remove failed for ${worktreePath}, pruning: ${err instanceof Error ? err.message : String(err)}`);
     try {
       await git(pi, cwd, ["worktree", "prune"], 5000);
-    } catch { /* ignore */ }
+    } catch (pruneErr) {
+      console.warn(`[pi-subagents] worktree prune failed for ${worktreePath}: ${pruneErr instanceof Error ? pruneErr.message : String(pruneErr)}`);
+    }
   }
 }
 
@@ -201,5 +223,7 @@ async function removeWorktree(pi: ExtensionAPI, cwd: string, worktreePath: strin
 export async function pruneWorktrees(pi: ExtensionAPI, cwd: string): Promise<void> {
   try {
     await git(pi, cwd, ["worktree", "prune"], 5000);
-  } catch { /* ignore */ }
+  } catch (err) {
+    console.warn(`[pi-subagents] worktree prune failed in ${cwd}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
