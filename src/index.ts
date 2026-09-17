@@ -13,7 +13,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
@@ -33,6 +33,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { runResumeFiltered, toResumeSession } from "./resume-filtered.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -4033,6 +4034,29 @@ Write the file using the write tool. Only write the file, nothing else.`;
   pi.registerCommand("agents", {
     description: "Manage agents",
     handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
+  });
+
+  // Core's /resume is hardcoded ahead of extension commands, so its picker
+  // can be neither filtered nor collapsed from here. This parallel command
+  // lists the same store and hides spawned (subagent) sessions — the entries
+  // that bury real conversations under hundreds of general-purpose#… rows.
+  pi.registerCommand("resume-filtered", {
+    description: "Resume an interactive session (hides subagent sessions)",
+    handler: async (args, ctx) => {
+      await runResumeFiltered(
+        {
+          // Same loaders core's picker uses for its current/all scopes.
+          listCurrent: async () =>
+            (await SessionManager.list(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionDir())).map(toResumeSession),
+          listAll: async () => (await SessionManager.listAll()).map(toResumeSession),
+          currentSessionFile: () => ctx.sessionManager.getSessionFile?.(),
+          select: (title, options) => ctx.ui.select(title, options),
+          notify: (message, type) => ctx.ui.notify(message, type ?? "info"),
+          switchSession: (path) => ctx.switchSession(path),
+        },
+        args,
+      );
+    },
   });
 
   /**
