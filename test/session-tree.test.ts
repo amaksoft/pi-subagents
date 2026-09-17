@@ -145,6 +145,18 @@ describe("resume tree picker", () => {
     expect(second.done).toHaveBeenCalledWith(undefined);
   });
 
+  it("Enter on a group row expands instead of resuming", async () => {
+    const { groupIdenticalRoots } = await import("../src/session-tree.js");
+    const a = session({ path: "/s/a.jsonl", firstMessage: "probe" });
+    const b = session({ path: "/s/b.jsonl", firstMessage: "probe" });
+    const { ui, done } = picker(groupIdenticalRoots(buildSessionTree([a, b])));
+    ui.handleInput(ENTER);
+    expect(done).not.toHaveBeenCalled();
+    // Group row plus both members visible after expansion.
+    const lines = ui.render(100).join("\n");
+    expect(lines.match(/probe/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
   it("← on a collapsed child jumps to its parent", () => {
     const parent = session({ path: "/s/p.jsonl", name: "p" });
     const child = session({ path: "/s/c.jsonl", parentSessionPath: "/s/p.jsonl", name: "c" });
@@ -195,5 +207,77 @@ describe("resume tree picker", () => {
     ui.handleInput(DOWN);
     const lines = ui.render(100).join("\n");
     expect(lines).toContain("(1/1)");
+  });
+});
+
+describe("groupIdenticalRoots", () => {
+  it("folds repeated parentless runs into one expandable group", async () => {
+    const { groupIdenticalRoots, visibleRows } = await import("../src/session-tree.js");
+    const a = session({ path: "/s/a.jsonl", firstMessage: "list the files in /tmp", modified: new Date(1000) });
+    const b = session({ path: "/s/b.jsonl", firstMessage: "list the files in /tmp  ", modified: new Date(2000) });
+    const c = session({ path: "/s/c.jsonl", firstMessage: "real work", modified: new Date(3000) });
+    const grouped = groupIdenticalRoots(buildSessionTree([a, b, c]));
+    // Newest-first from the tree build; group emitted at first member's
+    // position; singletons untouched.
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0].session.path).toBe("/s/c.jsonl");
+    expect(grouped[1].session.path).toMatch(/^duplicate:/);
+    expect(grouped[1].children.map(m => m.session.path)).toEqual(["/s/b.jsonl", "/s/a.jsonl"]);
+    // Collapsed by default with the member count as badge source…
+    const rows = visibleRows(grouped, new Set());
+    expect(rows).toHaveLength(2);
+    expect(rows[1].isGroup).toBe(true);
+    expect(rows[1].collapsedCount).toBe(2);
+    // …expandable to individuals.
+    const open = visibleRows(grouped, new Set([rows[1].session.path]));
+    expect(open.map(r => r.session.path)).toEqual(["/s/c.jsonl", rows[1].session.path, "/s/b.jsonl", "/s/a.jsonl"]);
+  });
+
+  it("leaves linked roots and blank prompts alone", async () => {
+    const { groupIdenticalRoots } = await import("../src/session-tree.js");
+    const linked = session({ path: "/s/l.jsonl", parentSessionPath: "/s/p.jsonl", firstMessage: "same text" });
+    const twin = session({ path: "/s/t.jsonl", firstMessage: "same text" });
+    const blank = session({ path: "/s/e.jsonl", firstMessage: "   " });
+    const grouped = groupIdenticalRoots(buildSessionTree([linked, twin, blank]));
+    // linked root keeps its row (identity is the link); blank has no key.
+    expect(grouped.map(n => n.session.path)).toEqual(["/s/l.jsonl", "/s/t.jsonl", "/s/e.jsonl"]);
+  });
+});
+
+describe("resume tree picker cancel paths", () => {
+  const CTRL_C = "\x03";
+
+  it("Esc with no filter cancels", () => {
+    const { ui, done } = picker(buildSessionTree([session({ path: "/s/a.jsonl" })]));
+    ui.handleInput(ESC);
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(done).toHaveBeenCalledWith(undefined);
+  });
+
+  it("Esc with a filter clears first, cancels second", () => {
+    const { ui, done } = picker(buildSessionTree([session({ path: "/s/a.jsonl", name: "alpha" })]));
+    ui.handleInput("z");
+    expect(ui.render(100).join("\n")).toContain("Filter: z");
+    ui.handleInput(ESC);
+    expect(done).not.toHaveBeenCalled();
+    expect(ui.render(100).join("\n")).not.toContain("Filter:");
+    ui.handleInput(ESC);
+    expect(done).toHaveBeenCalledWith(undefined);
+  });
+
+  it("Ctrl+C cancels immediately even with a filter set", () => {
+    const { ui, done } = picker(buildSessionTree([session({ path: "/s/a.jsonl", name: "alpha" })]));
+    ui.handleInput("z");
+    ui.handleInput(CTRL_C);
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(done).toHaveBeenCalledWith(undefined);
+  });
+
+  it("navigation and expansion never resolve the picker", () => {
+    const parent = session({ path: "/s/p.jsonl", name: "p" });
+    const child = session({ path: "/s/c.jsonl", parentSessionPath: "/s/p.jsonl", name: "c" });
+    const { ui, done } = picker(buildSessionTree([parent, child]));
+    for (const key of [UP, DOWN, RIGHT, LEFT, " ", "k", "j"]) ui.handleInput(key);
+    expect(done).not.toHaveBeenCalled();
   });
 });

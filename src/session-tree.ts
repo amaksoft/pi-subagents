@@ -19,6 +19,8 @@ export interface SessionTreeNode {
   children: SessionTreeNode[];
   /** Total descendants (children + below), for "N subagent runs" badges. */
   descendantCount: number;
+  /** Set on synthetic duplicate-group nodes (see groupIdenticalRoots). */
+  groupKey?: string;
 }
 
 export interface TreeRow {
@@ -32,6 +34,8 @@ export interface TreeRow {
   collapsedCount: number;
   /** Search hit context: shown dimmed, not itself a match. */
   dimmed?: boolean;
+  /** Synthetic duplicate-group row: Enter expands instead of resuming. */
+  isGroup?: boolean;
 }
 
 /**
@@ -80,6 +84,7 @@ export function visibleRows(roots: SessionTreeNode[], expanded: ReadonlySet<stri
       isParent,
       expanded: isExpanded,
       collapsedCount: isParent && !isExpanded ? node.descendantCount : 0,
+      ...(node.groupKey !== undefined ? { isGroup: true } : {}),
     });
     if (isExpanded) for (const child of node.children) walk(child, depth + 1);
   };
@@ -97,6 +102,75 @@ export function toggleExpanded(expanded: ReadonlySet<string>, path: string): Set
 
 function rowText(session: ResumeSession): string {
   return `${session.name?.trim() ?? ""} ${session.firstMessage}`.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/** Normalized first user message — the duplicate-grouping key. */
+export function firstMessageKey(session: ResumeSession): string {
+  return session.firstMessage.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Collapse parentless roots with identical first messages into synthetic
+ * group nodes ("list the files in /tmp ×16"). Probe/eval harnesses and
+ * retried prompts produce these; they are the same run repeated, so one row
+ * stands for all, expandable to individuals. Only parentless roots group:
+ * linked children already hide under their (collapsed) parent, and grouping
+ * them would break the tree relations. Singles pass through untouched.
+ * Pure — tested directly.
+ */
+export function groupIdenticalRoots(roots: SessionTreeNode[]): SessionTreeNode[] {
+  const byKey = new Map<string, SessionTreeNode[]>();
+  for (const root of roots) {
+    // Linked roots (forks, orphans with a recorded parent) keep their row:
+    // their identity is the link, not the text.
+    if (root.session.parentSessionPath) continue;
+    const key = firstMessageKey(root.session);
+    if (!key) continue;
+    const bucket = byKey.get(key);
+    if (bucket) bucket.push(root);
+    else byKey.set(key, [root]);
+  }
+  // Rebuild in original order, emitting each group at its first member's
+  // position.
+  const emitted = new Set<string>();
+  const out: SessionTreeNode[] = [];
+  for (const root of roots) {
+    if (root.session.parentSessionPath || !firstMessageKey(root.session)) {
+      out.push(root);
+      continue;
+    }
+    const key = firstMessageKey(root.session);
+    if (emitted.has(key)) continue;
+    emitted.add(key);
+    const members = byKey.get(key)!;
+    out.push(members.length < 2 ? members[0] : makeGroupNode(key, members));
+  }
+  return out;
+}
+
+/** Synthetic parent whose children are the duplicate runs, newest first. */
+function makeGroupNode(key: string, members: SessionTreeNode[]): SessionTreeNode {
+  const sorted = [...members].sort(
+    (a, b) => b.session.modified.getTime() - a.session.modified.getTime(),
+  );
+  const latest = sorted[0].session;
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return {
+    session: {
+      // Stable, unresumable pseudo-path: the picker expands groups on Enter
+      // instead of resuming (see isGroup), so this never reaches switchSession.
+      path: `duplicate:${hash.toString(36)}`,
+      name: latest.name,
+      parentSessionPath: undefined,
+      messageCount: sorted.reduce((n, m) => n + m.session.messageCount, 0),
+      modified: latest.modified,
+      firstMessage: latest.firstMessage,
+    },
+    children: sorted,
+    descendantCount: sorted.length,
+    groupKey: key,
+  };
 }
 
 /**
@@ -132,6 +206,7 @@ export function searchRows(roots: SessionTreeNode[], query: string): TreeRow[] {
       expanded: true,
       collapsedCount: 0,
       dimmed: !matched.has(`hit:${node.session.path}`),
+      ...(node.groupKey !== undefined ? { isGroup: true } : {}),
     });
     for (const child of node.children) emit(child, depth + 1);
   };

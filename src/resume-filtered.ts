@@ -14,7 +14,7 @@
  */
 
 import type { SessionInfo } from "@earendil-works/pi-coding-agent";
-import { buildSessionTree, type SessionTreeNode } from "./session-tree.js";
+import { buildSessionTree, groupIdenticalRoots, type SessionTreeNode } from "./session-tree.js";
 import { selectItem } from "./ui/select-item.js";
 
 /** Minimal session shape this needs (structural subset of SessionInfo). */
@@ -86,8 +86,10 @@ export async function runResumeFiltered(deps: ResumeFilteredDeps, args: string):
   const currentFile = deps.currentSessionFile?.();
   if (deps.pickFromTree) {
     // Tree mode: relations preserved, children collapsed by default. Nothing
-    // is hidden — subagent runs sit under their spawner with a count badge.
-    const picked = await deps.pickFromTree(buildSessionTree(sessions));
+    // is hidden — subagent runs sit under their spawner with a count badge,
+    // and repeated parentless runs (probe harnesses, retried prompts) fold
+    // into one expandable group row each.
+    const picked = await deps.pickFromTree(groupIdenticalRoots(buildSessionTree(sessions)));
     if (!picked) return; // escaped
     try {
       await deps.switchSession(picked);

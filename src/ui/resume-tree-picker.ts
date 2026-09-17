@@ -130,9 +130,23 @@ export function createResumeTreePicker(
         if (row?.isParent) expanded = toggleExpanded(expanded, row.session.path);
       } else if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
         const row = rows()[selected];
-        done(row?.session.path);
+        // Group rows expand instead of resuming: the pseudo-path is shared by
+        // all members, so there is nothing unambiguous to switch to.
+        if (row?.isGroup) {
+          expanded = toggleExpanded(expanded, row.session.path);
+        } else {
+          done(row?.session.path);
+        }
         return;
-      } else if (data === "\x1b") {
+      } else if (matchesKey(data, "ctrl+c")) {
+        // Immediate way out regardless of filter state.
+        done(undefined);
+        return;
+      } else if (matchesKey(data, "escape") || data === "\x1b") {
+        // Cancel: matchesKey first (honors user-remapped Escape and whatever
+        // raw form the terminal layer delivered — the viewer-proven pattern),
+        // raw lone-Esc fallback, Ctrl+C as the universal way out (the TUI
+        // hands Ctrl+C to the focused component deliberately).
         if (filter) filter = "";
         else done(undefined);
         return;
