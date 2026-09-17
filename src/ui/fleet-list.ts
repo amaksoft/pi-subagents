@@ -15,7 +15,7 @@
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
-import { isStoppableStatus } from "../status-note.js";
+import { describeStall, isStoppableStatus } from "../status-note.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
@@ -74,6 +74,29 @@ type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
 /** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
 export function formatFleetElapsed(ms: number): string {
   return `${Math.max(0, Math.round(ms / 1000))}s`;
+}
+
+/** `▸ bash 3m` — current tool plus time-in-tool, for running agent rows. */
+export function formatActivityAge(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.round(s / 60)}m`;
+}
+
+/**
+ * Live-activity tail for an agent row: stall diagnosis when flagged, else the
+ * current tool and its elapsed time. Finished agents show nothing (their
+ * clock is frozen in the main stats). Undefined when there is nothing to say.
+ */
+export function describeFleetActivity(record: AgentRecord): string | undefined {
+  if (record.status !== "running" && record.status !== "queued") return undefined;
+  // Every heartbeat clears stalledSince, so a set flag always means silence
+  // since the sweep ran — no stale-flag case to handle here.
+  const stall = describeStall(record);
+  if (stall) return stall;
+  if (record.currentTool) {
+    return `▸ ${record.currentTool.name} ${formatActivityAge(Date.now() - record.currentTool.startedAt)}`;
+  }
+  return undefined;
 }
 
 /** `↓ 13.1k tokens` — down-arrow prefix, compact magnitude, plural "tokens". */
@@ -607,7 +630,8 @@ export class FleetList {
     const tokens = getLifetimeTotal(record.lifetimeUsage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const cost = this.showCost() ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
-    const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
+    const activity = describeFleetActivity(record);
+    const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}${activity ? ` · ${activity}` : ""}`;
     const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
     return rightAlign(left, right, width);
   }

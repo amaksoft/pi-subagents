@@ -177,6 +177,24 @@ export interface AgentRecord {
   toolUses: number;
   startedAt: number;
   completedAt?: number;
+  /**
+   * Last observed sign of life: tool start/end, streamed text, usage update.
+   * Heartbeat for stall detection — see trackToolActivity/touchActivity and
+   * isStalled in status-note.ts. Initialized at spawn alongside startedAt.
+   */
+  lastActivityAt: number;
+  /**
+   * Tool currently executing, if any. Set on tool start, cleared on tool end —
+   * a record whose currentTool started long ago with no end is exactly what
+   * "stuck" looks like from the outside (e.g. bash hung on blocked net).
+   */
+  currentTool?: { name: string; startedAt: number };
+  /**
+   * When the stall sweep last flagged this agent. Set by the periodic sweep,
+   * cleared by any subsequent activity. Display-only — status is untouched,
+   * so a slow-but-alive agent is never misreported as terminal.
+   */
+  stalledSince?: number;
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;

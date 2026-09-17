@@ -2910,3 +2910,73 @@ describe("topLevelStopRefusal", () => {
     expect(topLevelStopRefusal(rec({ status: "queued" }), "a1")).toBeUndefined();
   });
 });
+
+describe("AgentManager activity heartbeat (stall visibility)", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("initializes the heartbeat at spawn and threads session-name parts to runAgent", async () => {
+    manager = new AgentManager();
+    let captured: any;
+    vi.mocked(runAgent).mockImplementation(async (_c, _t, _p, opts: any) => {
+      captured = opts;
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "check the token path",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.lastActivityAt).toBe(record.startedAt);
+    expect(record.currentTool).toBeUndefined();
+
+    await record.promise;
+    // Human-meaningful /resume names: handle + description reach the runner.
+    expect(captured.handle).toBe("explore");
+    expect(captured.description).toBe("check the token path");
+  });
+
+  it("tool start/end flows through the heartbeat (currentTool set then cleared)", async () => {
+    manager = new AgentManager();
+    let captured: any;
+    let resolveRun!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation(
+      (_c, _t, _p, opts: any) =>
+        new Promise((resolve) => {
+          captured = opts;
+          resolveRun = resolve;
+        }),
+    );
+
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "hang candidate",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    // Let startAgent run to the runAgent call.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured).toBeDefined();
+
+    const before = record.lastActivityAt;
+    captured.onToolActivity({ type: "start", toolName: "bash" });
+    expect(record.currentTool?.name).toBe("bash");
+    expect(record.toolUses).toBe(0);
+    expect(record.lastActivityAt).toBeGreaterThanOrEqual(before);
+
+    captured.onToolActivity({ type: "end", toolName: "bash" });
+    expect(record.currentTool).toBeUndefined();
+    expect(record.toolUses).toBe(1);
+
+    // Streamed text is a sign of life even with no tool activity.
+    record.lastActivityAt = before;
+    captured.onTextDelta?.("token", "token");
+    expect(record.lastActivityAt).toBeGreaterThanOrEqual(before);
+
+    resolveRun({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await record.promise;
+  });
+});

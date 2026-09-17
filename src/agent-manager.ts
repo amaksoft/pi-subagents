@@ -22,7 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import { isStoppableStatus } from "./status-note.js";
+import { isStalled, isStoppableStatus, touchActivity, trackToolActivity } from "./status-note.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
@@ -544,6 +544,7 @@ export class AgentManager {
       status: options.isBackground ? "queued" : "running",
       toolUses: 0,
       startedAt: Date.now(),
+      lastActivityAt: Date.now(),
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
       compactionCount: 0,
@@ -817,12 +818,18 @@ export class AgentManager {
       configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
-        if (activity.type === "end") record.toolUses++;
+        trackToolActivity(record, activity);
         options.onToolActivity?.(activity);
       },
       onTurnEnd: options.onTurnEnd,
-      onTextDelta: options.onTextDelta,
+      onTextDelta: (delta, fullText) => {
+        // Streaming text is a sign of life: a long model stream with no tool
+        // calls is slow, not stuck. Assignment only — no listener fan-out.
+        touchActivity(record);
+        options.onTextDelta?.(delta, fullText);
+      },
       onAssistantUsage: (usage) => {
+        touchActivity(record);
         addUsage(record.lifetimeUsage, usage);
         this.onUsage?.(record, usage);
         options.onAssistantUsage?.(usage);
@@ -1253,10 +1260,11 @@ export class AgentManager {
       try {
         const { text, failure } = await resumeAgent(session, prompt, {
           onToolActivity: (activity) => {
-            if (activity.type === "end") record.toolUses++;
+            trackToolActivity(record, activity);
             options?.onToolActivity?.(activity);
           },
           onAssistantUsage: (usage) => {
+            touchActivity(record);
             addUsage(record.lifetimeUsage, usage);
             this.onUsage?.(record, usage);
             options?.onAssistantUsage?.(usage);
@@ -1355,7 +1363,7 @@ export class AgentManager {
 
     const promise = resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
-        if (activity.type === "end") record.toolUses++;
+        trackToolActivity(record, activity);
         options.onToolActivity?.(activity);
       },
       onAssistantUsage: (usage) => {
@@ -1572,9 +1580,20 @@ export class AgentManager {
   }
 
   private cleanup() {
-    const cutoff = Date.now() - 10 * 60_000;
+    const now = Date.now();
+    const cutoff = now - 10 * 60_000;
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued") continue;
+      if (record.status === "running" || record.status === "queued") {
+        // Stall sweep (same 60s cadence): flag silence, never act on it.
+        // Acting (auto-abort) is deliberately a later, opt-in step — a slow
+        // but alive agent must not be killed by a timer. The flag tells the
+        // human/model surfaces (FleetView, get_subagent_result) WHEN to reach
+        // for the existing stop_subagent kill switch.
+        if (record.stalledSince === undefined && isStalled(record, now)) {
+          record.stalledSince = now;
+        }
+        continue;
+      }
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }

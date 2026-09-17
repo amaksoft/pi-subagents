@@ -16,6 +16,92 @@ export function isStoppableStatus(status: string): boolean {
 }
 
 /**
+ * Stall visibility for hung agents (e.g. a tool call wedged on blocked
+ * network with no timeout). The record already counts tool *ends*; what was
+ * missing is any notion of a tool *start* without an end — this closes it.
+ *
+ * Active statuses only: a terminal record with an old heartbeat is finished,
+ * not stuck. `stalledSince` is set by the manager's periodic sweep and
+ * cleared by any activity, so it is a display flag, never a status.
+ */
+
+/** Default stall threshold: ten minutes without any sign of life. */
+export const DEFAULT_STALL_THRESHOLD_MS = 10 * 60_000;
+
+/** Minimal activity shape — structural so this module stays import-cycle-free. */
+export interface ToolActivityLike {
+  type: "start" | "end";
+  toolName: string;
+}
+
+/**
+ * Record one tool event on the agent heartbeat. Start sets currentTool,
+ * end clears it and bumps the use count; both refresh lastActivityAt and
+ * clear a previously flagged stall. Call from every onToolActivity handler.
+ */
+export function trackToolActivity(
+  record: Pick<AgentRecord, "toolUses" | "lastActivityAt" | "currentTool" | "stalledSince">,
+  activity: ToolActivityLike,
+): void {
+  const now = Date.now();
+  if (activity.type === "start") {
+    record.currentTool = { name: activity.toolName, startedAt: now };
+  } else {
+    record.currentTool = undefined;
+    record.toolUses++;
+  }
+  record.lastActivityAt = now;
+  record.stalledSince = undefined;
+}
+
+/**
+ * Heartbeat for non-tool signs of life (streamed text deltas, usage updates).
+ * A long model stream with no tool calls is alive, not stalled.
+ */
+export function touchActivity(
+  record: Pick<AgentRecord, "lastActivityAt" | "stalledSince">,
+): void {
+  record.lastActivityAt = Date.now();
+  record.stalledSince = undefined;
+}
+
+/** Milliseconds since the record's last sign of life (floor 0). */
+export function stallElapsedMs(
+  record: Pick<AgentRecord, "lastActivityAt">,
+  now = Date.now(),
+): number {
+  return Math.max(0, now - record.lastActivityAt);
+}
+
+/** True when a running/queued agent has been silent past the threshold. */
+export function isStalled(
+  record: Pick<AgentRecord, "status" | "lastActivityAt">,
+  now = Date.now(),
+  thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
+): boolean {
+  if (record.status !== "running" && record.status !== "queued") return false;
+  return stallElapsedMs(record, now) >= thresholdMs;
+}
+
+/**
+ * One-line stall diagnosis for status surfaces (FleetView, get_subagent_result):
+ * "stalled 22m in bash" / "stalled 22m, idle (no tool running)".
+ * Undefined when not stalled.
+ */
+export function describeStall(
+  record: Pick<AgentRecord, "status" | "lastActivityAt" | "currentTool">,
+  now = Date.now(),
+  thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
+): string | undefined {
+  if (!isStalled(record, now, thresholdMs)) return undefined;
+  const mins = Math.max(1, Math.round(stallElapsedMs(record, now) / 60_000));
+  const where = record.currentTool
+    ? ` in ${record.currentTool.name}`
+    : ", idle (no tool running)";
+  return `stalled ${mins}m${where}`;
+}
+
+/**
  * Explicit parenthetical note for a non-normal terminal outcome, so the parent
  * agent can't mistake partial output for a completed result. Empty string for a
  * clean completion (and any unknown/non-terminal status).
