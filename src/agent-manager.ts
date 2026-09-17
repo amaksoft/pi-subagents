@@ -791,6 +791,11 @@ export class AgentManager {
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
+      // Human-meaningful `/resume` session names (see buildSessionName):
+      // the handle/alias identifies WHICH agent, the description says WHAT.
+      handle: record.handle,
+      alias: record.alias ?? undefined,
+      description: record.description,
       model: options.model,
       maxTurns: options.maxTurns,
       isolated: options.isolated,

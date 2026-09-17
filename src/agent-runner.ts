@@ -395,11 +395,52 @@ export interface ToolActivity {
   toolName: string;
 }
 
+/**
+ * Collapse whitespace and truncate a spawn description into a session-name
+ * slug, so `/resume` shows what the agent is doing instead of a bare type.
+ * Pure — tested directly.
+ */
+export function slugifyDescription(description: string | undefined, maxLen = 60): string | undefined {
+  if (!description) return undefined;
+  const collapsed = description.replace(/\s+/g, " ").trim();
+  if (!collapsed) return undefined;
+  return collapsed.length > maxLen ? `${collapsed.slice(0, maxLen - 1).trimEnd()}…` : collapsed;
+}
+
+/**
+ * Build the pi session name for a subagent run. Prefers the human-meaningful
+ * `@handle`/`@alias` plus a description slug over the random agentId suffix,
+ * so entries grouped under their parent in `/resume` are scannable:
+ * `Explore#auth-audit: check token refresh path` instead of
+ * `Explore#a1b2c3d4`. Falls back to the legacy `base#id` form when neither
+ * a handle nor a description is available (e.g. direct runAgent callers).
+ * Pure — tested directly.
+ */
+export function buildSessionName(
+  base: string,
+  opts: { handle?: string; alias?: string; description?: string; agentId?: string },
+): string {
+  const who = opts.alias || opts.handle || undefined;
+  const what = slugifyDescription(opts.description);
+  if (who && what) return `${base}#${who}: ${what}`;
+  if (who) return `${base}#${who}`;
+  if (what) return `${base}: ${what}`;
+  return opts.agentId ? `${base}#${opts.agentId.slice(0, 8)}` : base;
+}
+
 export interface RunOptions {
   /** ExtensionAPI instance — used for pi.exec() instead of execSync. */
   pi: ExtensionAPI;
-  /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
+  /** Manager-assigned id; legacy session-name suffix when no handle/description is available. */
   agentId?: string;
+  /**
+   * Human-meaningful session-name parts, supplied by the manager from the
+   * agent record. Preferred over `agentId` by {@link buildSessionName} so
+   * `/resume` entries say what the agent is doing, not just its type.
+   */
+  handle?: string;
+  alias?: string;
+  description?: string;
   model?: Model<any>;
   maxTurns?: number;
   signal?: AbortSignal;
@@ -1021,7 +1062,12 @@ export async function runAgent(
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
-    options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
+    buildSessionName(baseSessionName, {
+      handle: options.handle,
+      alias: options.alias,
+      description: options.description,
+      agentId: options.agentId,
+    }),
   );
 
   // Bind extensions so that session_start fires and extensions can initialize

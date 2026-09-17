@@ -122,6 +122,7 @@ vi.mock("../src/nested-tools.js", () => ({
 }));
 
 import {
+  buildSessionName,
   extensionCanonicalName,
   extensionCanonicalNames,
   getAgentConversation,
@@ -386,6 +387,74 @@ describe("agent-runner final output capture", () => {
     await runAgent(ctx, "Explore", "go", { pi, agentId: "a1b2c3d4e5f6" });
 
     expect(session.setSessionName).toHaveBeenCalledWith("Explore#a1b2c3d4");
+  });
+
+  it("prefers handle + description slug over the agentId suffix", async () => {
+    const { session } = createSession("NAMED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      agentId: "a1b2c3d4e5f6",
+      handle: "explore",
+      description: "check the token refresh path",
+    });
+
+    expect(session.setSessionName).toHaveBeenCalledWith("Explore#explore: check the token refresh path");
+  });
+
+  it("prefers alias over handle in the session name", async () => {
+    const { session } = createSession("NAMED");
+    createAgentSession.mockResolvedValue({ session });
+
+    // NOTE: this file mocks getAgentConfig to always resolve name "Explore",
+    // so the base is Explore regardless of the requested type.
+    await runAgent(ctx, "general-purpose", "go", {
+      pi,
+      agentId: "a1b2c3d4e5f6",
+      handle: "general-purpose",
+      alias: "auth-audit",
+      description: "verify the tool-registration finding",
+    });
+
+    expect(session.setSessionName).toHaveBeenCalledWith(
+      "Explore#auth-audit: verify the tool-registration finding",
+    );
+  });
+});
+
+describe("buildSessionName", () => {
+  it("falls back to the bare base with nothing to work with", () => {
+    expect(buildSessionName("Explore", {})).toBe("Explore");
+  });
+
+  it("falls back to the legacy agentId suffix", () => {
+    expect(buildSessionName("Explore", { agentId: "a1b2c3d4e5f6" })).toBe("Explore#a1b2c3d4");
+  });
+
+  it("uses the handle alone when there is no description", () => {
+    expect(buildSessionName("Explore", { handle: "explore-2", agentId: "a1b2c3d4" })).toBe(
+      "Explore#explore-2",
+    );
+  });
+
+  it("uses the description slug alone when there is no handle", () => {
+    expect(buildSessionName("Explore", { description: "go" })).toBe("Explore: go");
+  });
+
+  it("collapses whitespace and truncates long descriptions", () => {
+    expect(
+      buildSessionName("Explore", {
+        handle: "explore",
+        description: "  check\n\tthe   token\nrefresh path that is way too long to fit " + "x".repeat(100),
+      }),
+    ).toBe("Explore#explore: check the token refresh path that is way too long to fit xx…");
+  });
+
+  it("ignores blank descriptions", () => {
+    expect(buildSessionName("Explore", { handle: "explore", description: "   \n  " })).toBe(
+      "Explore#explore",
+    );
   });
 });
 
