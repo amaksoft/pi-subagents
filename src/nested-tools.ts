@@ -141,7 +141,7 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   if (record.status === "error") {
     return `Agent failed: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
   }
-  if (record.status === "queued" || record.status === "running") {
+  if (record.status === "queued" || record.status === "running" || record.status === "provisioning") {
     return `Agent ${record.id} is ${record.status}.`;
   }
   // A truncated run must not read as a finished one. The top-level path carries
@@ -391,8 +391,8 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // call is aborted) stops only this wait; the nested child keeps running and
       // stays unconsumed. Queued records have no promise until the manager starts
       // them, so poll — abortably — until they leave the queue, then await.
-      if (params.wait && (record.status === "queued" || record.status === "running")) {
-        while (record.status === "queued") {
+      if (params.wait && (record.status === "queued" || record.status === "running" || record.status === "provisioning")) {
+        while (record.status === "queued" || (record.status === "provisioning" && !record.promise)) {
           await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
         }
         if (record.promise) await abortable(record.promise, signal);
@@ -411,7 +411,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     }),
     execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.agent_id);
-      if (!ownsRecord(record, context.parentAgentId) || record.status !== "running") {
+      // Provisioning children accept queued steers like running ones whose
+      // session is not ready (pre-provisioning they were optimistically
+      // running — same reach, no behavior change beyond the rename).
+      if (!ownsRecord(record, context.parentAgentId) || (record.status !== "running" && record.status !== "provisioning")) {
         return textResult(`Running nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
       // Session not ready yet — queue the steer. The manager flushes pending

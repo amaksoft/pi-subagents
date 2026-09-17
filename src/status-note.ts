@@ -10,9 +10,11 @@
 
 import type { AgentRecord } from "./types.js";
 
-/** Whether an agent record can still be stopped (running or queued). */
+/** Whether an agent record can still be stopped. Provisioning counts: the
+ * slot is held and work may start at any moment — unreachable would strand
+ * it until kickoff, and abort-before-start is the cheapest possible stop. */
 export function isStoppableStatus(status: string): boolean {
-  return status === "running" || status === "queued";
+  return status === "running" || status === "queued" || status === "provisioning";
 }
 
 /**

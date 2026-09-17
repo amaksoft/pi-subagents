@@ -2923,8 +2923,9 @@ Terse command-style prompts produce shallow, generic work.
       // completion notification can still be delivered.
       // Queued agents have no promise yet (it's created when the queue starts
       // them), so poll until they leave the queue, then await like a running one.
-      if (params.wait && (record.status === "running" || record.status === "queued")) {
-        while (record.status === "queued") {
+      // Provisioning agents likewise have no promise until kickoff lands it.
+      if (params.wait && (record.status === "running" || record.status === "queued" || record.status === "provisioning")) {
+        while (record.status === "queued" || (record.status === "provisioning" && !record.promise)) {
           await abortable(
             new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WAIT_POLL_MS)),
             signal,
@@ -2952,7 +2953,9 @@ Terse command-style prompts produce shallow, generic work.
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
-      if (record.status === "running") {
+      if (record.status === "provisioning") {
+        output += "Agent is starting (provisioning slot held, run not kicked off yet). Use wait: true or check back later.";
+      } else if (record.status === "running") {
         // Judge fuel: what tool, how long, when it last produced output, and
         // the bounded live tail — a moving tail means working, a stale one
         // means wedged or fruitless. Without this a hung agent is a black box.
@@ -3013,7 +3016,11 @@ Terse command-style prompts produce shallow, generic work.
       if (!record || !isTopLevelAgent(record)) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
-      if (record.status !== "running") {
+      // Provisioning steers queue into pendingSteers and flush on session
+      // creation — same as a running agent whose session is not ready yet.
+      // (Pre-provisioning-status this branch read `!== "running"`; immediate
+      // spawns were optimistically running, so this preserves that reach.)
+      if (record.status !== "running" && record.status !== "provisioning") {
         return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
       }
       if (!record.session) {

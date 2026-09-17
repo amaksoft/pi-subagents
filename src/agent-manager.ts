@@ -550,8 +550,10 @@ export class AgentManager {
       alias: isTopLevelAgent(options) ? options.reclaim?.alias : undefined,
       // Overwritten below when the spawn is actually queued; a foreground spawn
       // that queues flips to "queued" there rather than being guessed at here,
-      // since the pool decision needs the finished record.
-      status: options.isBackground ? "queued" : "running",
+      // since the pool decision needs the finished record. Immediate starts
+      // are "provisioning", never optimistically "running" — the run has
+      // not kicked off until startAgent finishes setup (see M1).
+      status: options.isBackground ? "queued" : "provisioning",
       toolUses: 0,
       startedAt: Date.now(),
       lastActivityAt: Date.now(),
@@ -673,7 +675,10 @@ export class AgentManager {
    *   handle goes back.
    */
   private launch(id: string, record: AgentRecord, args: SpawnArgs, queuedPool: Pool | undefined): Promise<void> {
-    // Leaving the queue: startAgent wires its own parent-signal listener, so
+    // Leaving the queue (or starting now): the run exists but has not kicked
+    // off — provisioning, not running and no longer merely queued.
+    if (record.status === "queued") record.status = "provisioning";
+    // startAgent wires its own parent-signal listener, so
     // the queued one retires here rather than doubling (or leaking) it.
     this.detachQueuedAbort(record);
     const startup = this.startAgent(id, record, args).then(
@@ -739,12 +744,13 @@ export class AgentManager {
     const customCwd = options.cwd ?? undefined; // null (RPC "unset") → undefined
     const baseCwd = customCwd ?? ctx.cwd;
 
-    // Take the running state — and with it the concurrency slot — BEFORE the
+    // Take the concurrency slot — but NOT the running state — BEFORE the
     // first await. Creating a worktree is an awaited git call, and drainQueue
     // reads the pool counters synchronously in a loop: incrementing after the
     // await would let it start every queued agent at once while the first is
-    // still copying its repo. Claiming "running" here also keeps abort() and
-    // abortAll() able to reach an agent whose worktree is still being created.
+    // still copying its repo. The record stays "provisioning" until kickoff
+    // below; abort()/abortAll() reach provisioning agents, so the stranded-
+    // while-copying window stays covered without the optimistic-running lie.
     //
     // The pool is resolved ONCE, here, and carried to `settleRun` below:
     // `poolFor` reads `maxConcurrentForeground`, which the user can change from
@@ -762,7 +768,6 @@ export class AgentManager {
         record.slotLease = undefined;
       }
     };
-    record.status = "running";
     record.startedAt = Date.now();
     record.startGate = undefined;
     if (pool !== undefined) {
@@ -802,12 +807,12 @@ export class AgentManager {
       worktreeCwd = customCwd !== undefined ? wt.workPath : wt.path;
       this.worktreeRepos.add(baseCwd);
 
-      // No longer "running" means a stop landed while the copy was being made
-      // (abort(), abortAll()) — a window that did not exist when creation was
-      // synchronous. The record is already terminal, so launching the run would
-      // burn tokens on work nobody is waiting for: discard the fresh (and by
-      // definition unchanged) worktree instead.
-      if (record.status !== "running") {
+      // No longer provisioning means a stop landed while the copy was being
+      // made (abort(), abortAll()) — a window that did not exist when creation
+      // was synchronous. The record is already terminal, so launching the run
+      // would burn tokens on work nobody is waiting for: discard the fresh
+      // (and by definition unchanged) worktree instead.
+      if (record.status !== "provisioning") {
         releaseSlot();
         record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
         this.drainQueue();
@@ -1046,6 +1051,10 @@ export class AgentManager {
         return "";
       });
 
+    // Kickoff: the run exists from here on, so provisioning ends. Set BEFORE
+    // assigning the promise — waiters that observe a promise must never see a
+    // record that still claims to be starting.
+    if (record.status === "provisioning") record.status = "running";
     record.promise = promise;
 
     // Notify caller that spawn is complete (record is in the map, promise is set).
@@ -1239,7 +1248,9 @@ export class AgentManager {
     // background caller pre-checks this for a better message; the foreground
     // path relies on this guard (pi dispatches one message's tool calls via
     // Promise.all, so two resumes can overlap).
-    if (record.status === "running" || record.status === "queued") return undefined;
+    if (record.status === "running" || record.status === "queued" || record.status === "provisioning") {
+      return undefined;
+    }
 
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still
@@ -1590,7 +1601,9 @@ export class AgentManager {
       // Handle and alias share one namespace, so at most one agent answers a
       // name and it makes no difference which of the two matched.
       if (record.handle?.toLowerCase() !== wanted && record.alias?.toLowerCase() !== wanted) continue;
-      if (record.status === "running" || record.status === "queued") return { kind: "live", record };
+      if (record.status === "running" || record.status === "queued" || record.status === "provisioning") {
+        return { kind: "live", record };
+      }
       if (!fallback || record.startedAt > fallback.startedAt) fallback = record;
     }
     if (fallback) return { kind: "live", record: fallback };
@@ -1654,8 +1667,15 @@ export class AgentManager {
       return true;
     }
 
-    if (record.status !== "running") return false;
+    if (record.status !== "running" && record.status !== "provisioning") return false;
     record.abortController?.abort();
+    // Provisioning runs never kicked off, so no settle is coming to free the
+    // slot — release the lease here. Running runs settle normally (settleRun
+    // frees), so only the provisioning branch touches the lease.
+    if (record.status === "provisioning" && record.slotLease !== undefined) {
+      this.poolLedger = releaseLedgerSlot(this.poolLedger, record.slotLease);
+      record.slotLease = undefined;
+    }
     record.status = "stopped";
     record.completedAt = Date.now();
     // Same guard as above, for the wider window: steering a stopped agent is
@@ -1828,7 +1848,9 @@ export class AgentManager {
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued") continue;
+      if (record.status === "running" || record.status === "queued" || record.status === "provisioning") {
+        continue;
+      }
       if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
@@ -1844,7 +1866,7 @@ export class AgentManager {
   /** Whether any agents are still running or queued. */
   hasRunning(): boolean {
     return [...this.agents.values()].some(
-      r => r.status === "running" || r.status === "queued",
+      r => r.status === "running" || r.status === "queued" || r.status === "provisioning",
     );
   }
 
@@ -1854,7 +1876,9 @@ export class AgentManager {
     // pending steers, stop event): collect ids first, abort() mutates the queue.
     const ids = [
       ...this.queue.map(q => q.id),
-      ...[...this.agents.values()].filter(r => r.status === "running").map(r => r.id),
+      ...[...this.agents.values()]
+        .filter(r => r.status === "running" || r.status === "provisioning")
+        .map(r => r.id),
     ];
     let count = 0;
     for (const id of ids) if (this.abort(id)) count++;
@@ -1869,7 +1893,13 @@ export class AgentManager {
       this.drainQueue();
       const pending: Promise<unknown>[] = [];
       for (const record of this.agents.values()) {
-        if (record.status !== "running" && record.status !== "queued") continue;
+        if (
+          record.status !== "running"
+          && record.status !== "queued"
+          && record.status !== "provisioning"
+        ) {
+          continue;
+        }
         // An agent whose worktree is still being created is "running" with no
         // `promise` yet — without its startup the wait would return too early.
         const startup = this.startups.get(record.id);

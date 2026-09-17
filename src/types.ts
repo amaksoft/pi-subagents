@@ -172,7 +172,12 @@ export interface AgentRecord {
    */
   alias?: string;
   description: string;
-  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
+  /**
+   * Lifecycle state. `provisioning` = slot held, run not yet kicked off
+   * (worktree copy, session creation) — the honest replacement for the old
+   * optimistic `running`. See docs/architecture.md M1.
+   */
+  status: "queued" | "provisioning" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
   result?: string;
   error?: string;
   toolUses: number;

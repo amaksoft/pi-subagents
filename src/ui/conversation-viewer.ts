@@ -297,7 +297,7 @@ export class ConversationViewer implements Component {
     lines.push(hrTop);
     const modeLabel = getPromptModeLabel(this.record.type);
     const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
-    const statusIcon = this.record.status === "running"
+    const statusIcon = this.record.status === "running" || this.record.status === "provisioning"
       ? th.fg("accent", "●")
       : this.record.status === "completed"
         ? th.fg("success", "✓")
@@ -389,7 +389,7 @@ export class ConversationViewer implements Component {
 
   /** Stoppable only when a stop handler exists and the agent is still active. */
   private isStoppable(): boolean {
-    return !!this.onStop && (this.record.status === "running" || this.record.status === "queued");
+    return !!this.onStop && (this.record.status === "running" || this.record.status === "queued" || this.record.status === "provisioning");
   }
 
   /** The mode in force: an `m` press, else the setting, else the default. */
@@ -450,7 +450,7 @@ export class ConversationViewer implements Component {
 
   /** Steerable only when a steer handler exists and the agent is still active. */
   private canSteer(): boolean {
-    return !!this.onSteer && (this.record.status === "running" || this.record.status === "queued");
+    return !!this.onSteer && (this.record.status === "running" || this.record.status === "queued" || this.record.status === "provisioning");
   }
 
   /** Open the inline steering composer and route subsequent input to it. */

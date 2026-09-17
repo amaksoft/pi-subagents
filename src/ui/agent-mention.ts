@@ -75,7 +75,7 @@ export function mentionRoster(
   // type, which is also what `getConfig` falls back to when no label is set.
   displayNameOf: (type: string) => string = type => type,
 ): MentionTarget[] {
-  const live = (r: AgentRecord) => r.status === "running" || r.status === "queued";
+  const live = (r: AgentRecord) => r.status === "running" || r.status === "queued" || r.status === "provisioning";
   const records = manager.listAgents()
     .filter(r => r.handle !== undefined && r.parentAgentId === undefined)
     .sort((a, b) => (Number(live(b)) - Number(live(a))) || (a.startedAt - b.startedAt));
@@ -201,7 +201,7 @@ function describeTarget(target: MentionTarget): string {
     return `resume · ${target.typeLabel} · ${target.entry.description}`;
   }
   const { status, description, alias } = target.record;
-  const action = status === "running" || status === "queued" ? "send message" : "resume";
+  const action = status === "running" || status === "queued" || status === "provisioning" ? "send message" : "resume";
   // A row listed under its alias has lost the type its handle would have shown,
   // so name it — `@auth-audit` alone says nothing about what the agent is.
   // A type-derived row already reads as its type and would just repeat itself.

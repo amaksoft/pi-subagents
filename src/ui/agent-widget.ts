@@ -416,10 +416,10 @@ export class AgentWidget {
    */
   private renderWidget(tui: any, theme: Theme): string[] {
     const allAgents = this.widgetAgents();
-    const running = allAgents.filter(a => a.status === "running");
+    const running = allAgents.filter(a => a.status === "running" || a.status === "provisioning");
     const queued = allAgents.filter(a => a.status === "queued");
     const finished = allAgents.filter(a =>
-      a.status !== "running" && a.status !== "queued" && a.completedAt
+      a.status !== "running" && a.status !== "queued" && a.status !== "provisioning" && a.completedAt
       && this.shouldShowFinished(a.id, a.status),
     );
 
@@ -581,7 +581,7 @@ export class AgentWidget {
     let queuedCount = 0;
     let hasFinished = false;
     for (const a of allAgents) {
-      if (a.status === "running") { runningCount++; }
+      if (a.status === "running" || a.status === "provisioning") { runningCount++; }
       else if (a.status === "queued") { queuedCount++; }
       else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }

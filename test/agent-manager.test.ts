@@ -1782,7 +1782,9 @@ describe("AgentManager — abortAll", () => {
       isolation: "worktree",
     });
     const record = manager.getRecord(id)!;
-    expect(record.status).toBe("running");
+    // Provisioning, not running: the run has not kicked off (versioned break
+    // from optimistic-running — the stop below must still reach it).
+    expect(record.status).toBe("provisioning");
 
     // Stop lands while the repo copy is still in flight.
     expect(manager.abort(id)).toBe(true);
@@ -1814,7 +1816,7 @@ describe("AgentManager — abortAll", () => {
       isolation: "worktree",
     });
     const id = manager.listAgents()[0].id;
-    expect(manager.getRecord(id)?.status).toBe("running");
+    expect(manager.getRecord(id)?.status).toBe("provisioning");
     expect(manager.abort(id)).toBe(true);
 
     rejectCopy(new Error("git worktree add failed"));
@@ -3282,5 +3284,103 @@ describe("abort listener safety (total abort)", () => {
     ctrl.abort();
     await manager.getRecord(waiter)!.promise;
     expect(["completed", "stopped"]).toContain(manager.getRecord(waiter)!.status);
+  });
+});
+
+describe("provisioning status (explicit startup, no optimistic running)", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("slow setup holds provisioning until kickoff, then flips to running", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    let releaseCopy!: (wt: unknown) => void;
+    vi.mocked(createWorktree).mockImplementationOnce(
+      () => new Promise(resolve => { releaseCopy = resolve as never; }),
+    );
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "x",
+      isBackground: true,
+      isolation: "worktree",
+    });
+    // Pool room, copy in flight: starting, not running.
+    expect(manager.getRecord(id)!.status).toBe("provisioning");
+    releaseCopy({ path: "/tmp/wt", branch: "b", baseSha: "s", workPath: "/tmp/wt" });
+    // Kickoff assigns the promise asynchronously — poll for the transition
+    // rather than reading .promise before it exists (await undefined would
+    // resolve instantly and assert mid-flight).
+    for (let i = 0; i < 200 && manager.getRecord(id)!.status === "provisioning"; i++) {
+      await new Promise(r => setTimeout(r, 0));
+    }
+    await manager.getRecord(id)!.promise;
+    expect(manager.getRecord(id)!.status).toBe("completed");
+  });
+
+  it("queued spawns pass through provisioning on drain", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    const first = manager.spawn(mockPi, mockCtx, "Explore", "one", { description: "one", isBackground: true });
+    const second = manager.spawn(mockPi, mockCtx, "Explore", "two", { description: "two", isBackground: true });
+    expect(manager.getRecord(second)!.status).toBe("queued");
+    await manager.getRecord(first)!.promise;
+    await manager.getRecord(second)!.promise;
+    // Drained, kicked, settled — never stuck, never double-counted.
+    expect(manager.getRecord(second)!.status).toBe("completed");
+  });
+
+  it("aborting during provisioning frees the slot (no leak)", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    let releaseCopy!: () => void;
+    vi.mocked(createWorktree).mockImplementationOnce(
+      () => new Promise(resolve => { releaseCopy = () => resolve(undefined as never); }),
+    );
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "gated", {
+      description: "gated",
+      isBackground: true,
+      isolation: "worktree",
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("provisioning");
+    expect(record.slotLease).toBeDefined();
+    expect(manager.abort(id)).toBe(true);
+    expect(record.status).toBe("stopped");
+    expect(record.slotLease).toBeUndefined();
+    // Slot freed: a new spawn starts instead of queueing behind a ghost.
+    const next = manager.spawn(mockPi, mockCtx, "Explore", "next", { description: "next", isBackground: true });
+    expect(manager.getRecord(next)!.status).not.toBe("queued");
+    releaseCopy();
+    await manager.getRecord(next)!.promise;
+  });
+
+  it("provisioning agents are stoppable but never stall-flagged", async () => {
+    const { isStoppableStatus, isStalled } = await import("../src/status-note.js");
+    expect(isStoppableStatus("provisioning")).toBe(true);
+    const record = {
+      status: "provisioning",
+      lastActivityAt: 0,
+      startedAt: 0,
+    } as any;
+    expect(isStalled(record, Date.now(), 1)).toBe(false);
   });
 });

@@ -96,7 +96,11 @@ export function describeFleetActivity(
   now = Date.now(),
   thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
 ): string | undefined {
-  if (record.status !== "running" && record.status !== "queued") return undefined;
+  if (record.status !== "running" && record.status !== "queued" && record.status !== "provisioning") {
+    return undefined;
+  }
+  // Provisioning rows read as starting: no tool yet, but visibly not stuck.
+  if (record.status === "provisioning" && !record.currentTool) return "starting";
   // A snoozed agent is quiet by request, not by neglect — badge it so the
   // judge does not mistake the missing stall text for health *or* trouble.
   const snoozed = record.snoozedUntil !== undefined && now < record.snoozedUntil
