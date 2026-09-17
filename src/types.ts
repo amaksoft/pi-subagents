@@ -197,6 +197,13 @@ export interface AgentRecord {
    */
   lastOutputAt?: number;
   /**
+   * Reasoning stretch start (thinking deltas flowing, no tool running).
+   * Lets the judge read "reasoning for 14m" instead of "between tools".
+   * Set on thinking start, cleared by articulation (text), action (tool
+   * start), or the end of the thinking block.
+   */
+  reasoningSince?: number;
+  /**
    * Snoozed-until timestamp (see manager.snooze). While set and in the
    * future, isStalled stays false: the judge asked for quiet, so all
    * surfaces — flag, FleetView, counts, auto-abort — hold their fire.

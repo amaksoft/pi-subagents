@@ -504,6 +504,12 @@ export interface RunOptions {
    * delta. Handlers keep a bounded tail (last lines) plus the timestamp.
    */
   onToolOutput?: (delta: string) => void;
+  /**
+   * Called on model reasoning activity (thinking deltas). Heartbeat only —
+   * thinking proves life but is not judge-visible output, so it must not
+   * touch the output timestamp or tail.
+   */
+  onThinkingActivity?: (phase: "start" | "delta" | "end") => void;
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
@@ -1136,6 +1142,17 @@ export async function runAgent(
       currentMessageText += event.assistantMessageEvent.delta;
       options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
     }
+    // Reasoning deltas prove the model is working through the problem —
+    // without this, a long silent think is indistinguishable from wedged.
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
+      options.onThinkingActivity?.("delta");
+    }
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_start") {
+      options.onThinkingActivity?.("start");
+    }
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
+      options.onThinkingActivity?.("end");
+    }
     if (event.type === "tool_execution_start") {
       options.onToolActivity?.({ type: "start", toolName: event.toolName });
     }
@@ -1225,6 +1242,7 @@ export async function resumeAgent(
   options: {
     onToolActivity?: (activity: ToolActivity) => void;
     onToolOutput?: (delta: string) => void;
+    onThinkingActivity?: (phase: "start" | "delta" | "end") => void;
     onAssistantUsage?: (usage: LifetimeUsage) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
@@ -1237,11 +1255,20 @@ export async function resumeAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  const unsubEvents = (options.onToolActivity || options.onToolOutput || options.onAssistantUsage || options.onCompaction)
+  const unsubEvents = (options.onToolActivity || options.onToolOutput || options.onThinkingActivity || options.onAssistantUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
         if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
         if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
         if (event.type === "bash_execution_update") options.onToolOutput?.(event.delta);
+        if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
+          options.onThinkingActivity?.("delta");
+        }
+        if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_start") {
+          options.onThinkingActivity?.("start");
+        }
+        if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
+          options.onThinkingActivity?.("end");
+        }
         if (event.type === "message_end" && event.message.role === "assistant") {
           const u = (event.message as any).usage;
           if (u) options.onAssistantUsage?.({

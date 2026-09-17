@@ -40,7 +40,7 @@ export interface ToolActivityLike {
  * clear a previously flagged stall. Call from every onToolActivity handler.
  */
 export function trackToolActivity(
-  record: Pick<AgentRecord, "toolUses" | "lastActivityAt" | "currentTool" | "stalledSince" | "liveOutput">,
+  record: Pick<AgentRecord, "toolUses" | "lastActivityAt" | "currentTool" | "stalledSince" | "liveOutput" | "reasoningSince">,
   activity: ToolActivityLike,
 ): void {
   const now = Date.now();
@@ -48,6 +48,8 @@ export function trackToolActivity(
     // Latest wins: parallel same-tool calls share one slot (documented
     // residual — see below), sequential calls always describe the newest.
     record.currentTool = { name: activity.toolName, startedAt: now };
+    // Acting ends reasoning: the model stopped thinking and started doing.
+    record.reasoningSince = undefined;
   } else {
     // Clear only when the ending call is the tracked one: with parallel
     // calls (start A, start B, end A) an unconditional clear would wipe B
@@ -121,15 +123,19 @@ export function formatStallAge(ms: number): string {
 
 /**
  * Judge line for a running tool: `bash for 22m, output 30s ago` (working)
- * vs `bash for 22m, silent throughout` (wedged or fruitless). Undefined
- * when no tool is running — idleness between tools is normal, not evidence.
+ * vs `bash for 22m, silent throughout` (wedged or fruitless). With no tool
+ * running, a reasoning stretch reads `reasoning for 14m`; plain idleness
+ * between tools is normal, not evidence, and reads undefined.
  */
 export function describeToolActivity(
-  record: Pick<AgentRecord, "currentTool" | "lastOutputAt">,
+  record: Pick<AgentRecord, "currentTool" | "lastOutputAt" | "reasoningSince">,
   now = Date.now(),
 ): string | undefined {
   const tool = record.currentTool;
-  if (!tool) return undefined;
+  if (!tool) {
+    if (record.reasoningSince === undefined) return undefined;
+    return `reasoning for ${formatStallAge(now - record.reasoningSince)}`;
+  }
   const elapsed = formatStallAge(now - tool.startedAt);
   const out = record.lastOutputAt !== undefined && record.lastOutputAt >= tool.startedAt
     ? `output ${formatStallAge(now - record.lastOutputAt)} ago`

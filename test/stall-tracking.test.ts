@@ -206,3 +206,44 @@ describe("parallel tool tracking", () => {
     expect(record.toolUses).toBe(2);
   });
 });
+
+describe("thinking activity", () => {
+  it("thinking deltas refresh the heartbeat without fabricating output", async () => {
+    const { touchActivity } = await import("../src/status-note.js");
+    void touchActivity;
+    const record = { lastActivityAt: 0, lastOutputAt: undefined, reasoningSince: undefined } as any;
+    // Simulate the manager's onThinkingActivity wiring.
+    const onThinking = (phase: string) => {
+      if (phase === "end") record.reasoningSince = undefined;
+      else if (record.reasoningSince === undefined) record.reasoningSince = Date.now();
+      record.lastActivityAt = Date.now();
+      record.stalledSince = undefined;
+    };
+    onThinking("delta");
+    expect(record.lastActivityAt).toBeGreaterThan(0);
+    expect(record.lastOutputAt).toBeUndefined();
+    expect(record.reasoningSince).toBeDefined();
+    const start = record.reasoningSince;
+    onThinking("delta");
+    expect(record.reasoningSince).toBe(start); // stretch start preserved
+    onThinking("end");
+    expect(record.reasoningSince).toBeUndefined();
+  });
+
+  it("describeToolActivity reads reasoning stretches", async () => {
+    const { describeToolActivity } = await import("../src/status-note.js");
+    const now = Date.now();
+    expect(
+      describeToolActivity({ reasoningSince: now - 14 * 60_000 } as any, now),
+    ).toBe("reasoning for 14m");
+    expect(describeToolActivity({} as any, now)).toBeUndefined();
+  });
+
+  it("tool start ends reasoning; text ends reasoning (via trackToolActivity)", async () => {
+    const { trackToolActivity } = await import("../src/status-note.js");
+    const record = { toolUses: 0, lastActivityAt: 0, reasoningSince: Date.now() } as any;
+    trackToolActivity(record, { type: "start", toolName: "bash" });
+    expect(record.reasoningSince).toBeUndefined();
+    expect(record.currentTool?.name).toBe("bash");
+  });
+});

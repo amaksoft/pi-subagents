@@ -829,6 +829,8 @@ export class AgentManager {
       onTurnEnd: options.onTurnEnd,
       onTextDelta: (delta, fullText) => {
         // Streaming text is output evidence as well as a sign of life.
+        // Articulation also ends a reasoning stretch.
+        record.reasoningSince = undefined;
         touchOutput(record);
         options.onTextDelta?.(delta, fullText);
       },
@@ -837,6 +839,14 @@ export class AgentManager {
         // a heartbeat — a build streaming output never flags.
         pushLiveOutput(record, delta);
         touchOutput(record);
+      },
+      onThinkingActivity: (phase) => {
+        // Reasoning deltas prove work through a stretch with no tool calls
+        // and no text — without this, a long think flags as stalled.
+        // Heartbeat only: thinking is not judge-visible output.
+        if (phase === "end") record.reasoningSince = undefined;
+        else if (record.reasoningSince === undefined) record.reasoningSince = Date.now();
+        touchActivity(record);
       },
       onAssistantUsage: (usage) => {
         touchActivity(record);
@@ -1277,6 +1287,11 @@ export class AgentManager {
             pushLiveOutput(record, delta);
             touchOutput(record);
           },
+          onThinkingActivity: (phase) => {
+            if (phase === "end") record.reasoningSince = undefined;
+            else if (record.reasoningSince === undefined) record.reasoningSince = Date.now();
+            touchActivity(record);
+          },
           onAssistantUsage: (usage) => {
             touchActivity(record);
             addUsage(record.lifetimeUsage, usage);
@@ -1383,6 +1398,14 @@ export class AgentManager {
       onToolOutput: (delta) => {
         pushLiveOutput(record, delta);
         touchOutput(record);
+      },
+      onThinkingActivity: (phase) => {
+        // Reasoning deltas prove work through a stretch with no tool calls
+        // and no text — without this, a long think flags as stalled.
+        // Heartbeat only: thinking is not judge-visible output.
+        if (phase === "end") record.reasoningSince = undefined;
+        else if (record.reasoningSince === undefined) record.reasoningSince = Date.now();
+        touchActivity(record);
       },
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
