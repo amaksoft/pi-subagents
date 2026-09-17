@@ -21,6 +21,8 @@ export interface SessionTreeNode {
   descendantCount: number;
   /** Set on synthetic duplicate-group nodes (see groupIdenticalRoots). */
   groupKey?: string;
+  /** Set on synthetic external-scope parents (see attachExternalParents). */
+  externalScope?: string;
 }
 
 export interface TreeRow {
@@ -36,6 +38,8 @@ export interface TreeRow {
   dimmed?: boolean;
   /** Synthetic duplicate-group row: Enter expands instead of resuming. */
   isGroup?: boolean;
+  /** Synthetic external-scope parent: label gains a scope suffix. */
+  externalScope?: string;
 }
 
 /**
@@ -85,6 +89,7 @@ export function visibleRows(roots: SessionTreeNode[], expanded: ReadonlySet<stri
       expanded: isExpanded,
       collapsedCount: isParent && !isExpanded ? node.descendantCount : 0,
       ...(node.groupKey !== undefined ? { isGroup: true } : {}),
+      ...(node.externalScope !== undefined ? { externalScope: node.externalScope } : {}),
     });
     if (isExpanded) for (const child of node.children) walk(child, depth + 1);
   };
@@ -102,6 +107,70 @@ export function toggleExpanded(expanded: ReadonlySet<string>, path: string): Set
 
 function rowText(session: ResumeSession): string {
   return `${session.name?.trim() ?? ""} ${session.firstMessage}`.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Nest orphans whose parent lives outside the listing (another scope dir,
+ * e.g. a devmate session) under a synthetic stub row, so they read as what
+ * they are — spawned children — instead of root-level interactive sessions.
+ * `resolve` maps an absent parent path to a display session (name/cwd from
+ * its header); unresolvable parents (deleted files) stay as plain roots.
+ * The stub carries the real parent path, so Enter resumes it like any row.
+ * Pure — tested directly.
+ */
+export function attachExternalParents(
+  roots: SessionTreeNode[],
+  resolve: (parentPath: string) => ResumeSession | undefined,
+): SessionTreeNode[] {
+  const known = new Set(roots.map(r => r.session.path));
+  const byParent = new Map<string, SessionTreeNode[]>();
+  for (const root of roots) {
+    const p = root.session.parentSessionPath;
+    if (p && !known.has(p)) {
+      const bucket = byParent.get(p);
+      if (bucket) bucket.push(root);
+      else byParent.set(p, [root]);
+    }
+  }
+  if (byParent.size === 0) return roots;
+  const stubbed = new Set<string>();
+  const stubs = new Map<string, SessionTreeNode>();
+  for (const [parentPath, orphans] of byParent) {
+    const stub = resolve(parentPath);
+    if (!stub) continue;
+    const sorted = [...orphans].sort(
+      (a, b) => b.session.modified.getTime() - a.session.modified.getTime(),
+    );
+    stubs.set(parentPath, {
+      session: stub,
+      children: sorted,
+      descendantCount: sorted.length,
+      externalScope: scopeLabel(parentPath),
+    });
+    for (const o of orphans) stubbed.add(o.session.path);
+  }
+  if (stubs.size === 0) return roots;
+  // Emit each stub at its first orphan's position; drop stubbed orphans.
+  const emitted = new Set<string>();
+  const out: SessionTreeNode[] = [];
+  for (const root of roots) {
+    const p = root.session.parentSessionPath;
+    if (p && stubs.has(p)) {
+      if (emitted.has(p)) continue;
+      emitted.add(p);
+      out.push(stubs.get(p)!);
+      continue;
+    }
+    if (stubbed.has(root.session.path)) continue;
+    out.push(root);
+  }
+  return out;
+}
+
+/** Short scope label from a session path, e.g. `devmate` from `…/sessions/devmate/x.jsonl`. */
+export function scopeLabel(sessionPath: string): string {
+  const m = sessionPath.replace(/\\/g, "/").match(/\/sessions\/([^/]+)\//);
+  return m ? m[1] : "another scope";
 }
 
 /** Normalized first user message — the duplicate-grouping key. */
@@ -207,6 +276,7 @@ export function searchRows(roots: SessionTreeNode[], query: string): TreeRow[] {
       collapsedCount: 0,
       dimmed: !matched.has(`hit:${node.session.path}`),
       ...(node.groupKey !== undefined ? { isGroup: true } : {}),
+      ...(node.externalScope !== undefined ? { externalScope: node.externalScope } : {}),
     });
     for (const child of node.children) emit(child, depth + 1);
   };

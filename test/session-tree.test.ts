@@ -281,3 +281,40 @@ describe("resume tree picker cancel paths", () => {
     expect(done).not.toHaveBeenCalled();
   });
 });
+
+describe("attachExternalParents", () => {
+  it("nests orphans under a stub row, first-orphan position, rest attached", async () => {
+    const { attachExternalParents, scopeLabel } = await import("../src/session-tree.js");
+    expect(scopeLabel("/Users/x/.pi/agent/sessions/devmate/abc.jsonl")).toBe("devmate");
+    expect(scopeLabel("/odd/path.jsonl")).toBe("another scope");
+    const mine = session({ path: "/s/mine.jsonl", firstMessage: "real work" });
+    const o1 = session({ path: "/s/o1.jsonl", parentSessionPath: "/ext/p.jsonl", firstMessage: "review A" });
+    const o2 = session({ path: "/s/o2.jsonl", parentSessionPath: "/ext/p.jsonl", firstMessage: "review B" });
+    const roots = buildSessionTree([mine, o1, o2]);
+    const stub = session({ path: "/ext/p.jsonl", firstMessage: "devmate batch" });
+    const attached = attachExternalParents(roots, p => (p === "/ext/p.jsonl" ? stub : undefined));
+    expect(attached.map(n => n.session.path)).toEqual(["/s/mine.jsonl", "/ext/p.jsonl"]);
+    expect(attached[1].children.map(c => c.session.path)).toEqual(["/s/o1.jsonl", "/s/o2.jsonl"]);
+    expect(attached[1].externalScope).toBe("another scope");
+    // Collapsed stub row carries the count; Enter resumes the real parent path.
+    const { visibleRows } = await import("../src/session-tree.js");
+    const rows = visibleRows(attached, new Set());
+    expect(rows[1].collapsedCount).toBe(2);
+    const { ui, done } = picker(attached);
+    ui.handleInput(DOWN); // onto stub
+    ui.handleInput(ENTER);
+    expect(done).toHaveBeenCalledWith("/ext/p.jsonl");
+  });
+
+  it("leaves orphans alone when the parent is unresolvable", async () => {
+    const { attachExternalParents } = await import("../src/session-tree.js");
+    const o = session({ path: "/s/o.jsonl", parentSessionPath: "/ext/gone.jsonl" });
+    expect(attachExternalParents(buildSessionTree([o]), () => undefined)).toHaveLength(1);
+  });
+
+  it("is a no-op without orphans", async () => {
+    const { attachExternalParents } = await import("../src/session-tree.js");
+    const roots = buildSessionTree([session({ path: "/s/a.jsonl" })]);
+    expect(attachExternalParents(roots, () => undefined)).toBe(roots);
+  });
+});

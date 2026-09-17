@@ -54,7 +54,8 @@ export function createResumeTreePicker(
     const badge = row.collapsedCount > 0
       ? ` · ${row.collapsedCount} child session${row.collapsedCount === 1 ? "" : "s"} (→ to expand)`
       : "";
-    return `${indent}${marker}${formatResumeRow(row.session, Date.now(), opts.currentFile)}${badge}`;
+    const scope = row.externalScope ? ` · ${row.externalScope} scope` : "";
+    return `${indent}${marker}${formatResumeRow(row.session, Date.now(), opts.currentFile)}${badge}${scope}`;
   };
 
   /** Window start keeping the selection visible. Pure part, tested via render. */

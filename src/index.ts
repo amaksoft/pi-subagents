@@ -4051,6 +4051,43 @@ Write the file using the write tool. Only write the file, nothing else.`;
             (await SessionManager.list(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionDir())).map(toResumeSession),
           listAll: async () => (await SessionManager.listAll()).map(toResumeSession),
           currentSessionFile: () => ctx.sessionManager.getSessionFile?.(),
+          // Stub rows for parents living in another scope dir (e.g. a
+          // devmate session): header + first session_info name, capped scan.
+          // Anything unreadable stays a plain root — never fail the listing.
+          resolveExternalParent: (parentPath) => {
+            try {
+              if (!existsSync(parentPath)) return undefined;
+              const content = readFileSync(parentPath, "utf8");
+              const lines = content.split("\n");
+              let cwd = "";
+              let modified = new Date(0);
+              try {
+                const header = JSON.parse(lines[0]);
+                cwd = (header.cwd as string) ?? "";
+                if (typeof header.timestamp === "string") modified = new Date(header.timestamp);
+              } catch { /* header unparseable: stub with path only */ }
+              let name: string | undefined;
+              for (const line of lines.slice(1, 500)) {
+                const m = line.match(/"type":"session_info"[^}]*"name":"((?:[^"\\]|\\.)*)"/);
+                if (m) {
+                  try {
+                    name = JSON.parse(`"${m[1]}"`);
+                  } catch { /* keep undefined */ }
+                  break;
+                }
+              }
+              return {
+                path: parentPath,
+                name,
+                parentSessionPath: undefined,
+                messageCount: 0,
+                modified,
+                firstMessage: cwd ? `Session in ${cwd}` : "Session in another scope",
+              };
+            } catch {
+              return undefined;
+            }
+          },
           // Collapsible tree overlay in tui mode only: custom components
           // need a terminal (see ExtensionMode docs). Other modes keep the
           // filtered flat list.

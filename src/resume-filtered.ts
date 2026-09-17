@@ -14,7 +14,7 @@
  */
 
 import type { SessionInfo } from "@earendil-works/pi-coding-agent";
-import { buildSessionTree, groupIdenticalRoots, type SessionTreeNode } from "./session-tree.js";
+import { attachExternalParents, buildSessionTree, groupIdenticalRoots, type SessionTreeNode } from "./session-tree.js";
 import { selectItem } from "./ui/select-item.js";
 
 /** Minimal session shape this needs (structural subset of SessionInfo). */
@@ -33,6 +33,12 @@ export interface ResumeFilteredDeps {
   listAll(): Promise<ResumeSession[]>;
   /** Absolute path of the session the command runs in, if known. */
   currentSessionFile?: () => string | undefined;
+  /**
+   * Resolve an absent parent path to a display session for the stub row.
+   * Without it, orphans whose parent lives in another scope (or is gone)
+   * stay as plain roots.
+   */
+  resolveExternalParent?: (parentPath: string) => ResumeSession | undefined;
   /**
    * Collapsible tree picker (tui only). When supplied, subagent sessions are
    * kept as collapsed children instead of filtered out; without it (non-tui
@@ -89,7 +95,11 @@ export async function runResumeFiltered(deps: ResumeFilteredDeps, args: string):
     // is hidden — subagent runs sit under their spawner with a count badge,
     // and repeated parentless runs (probe harnesses, retried prompts) fold
     // into one expandable group row each.
-    const picked = await deps.pickFromTree(groupIdenticalRoots(buildSessionTree(sessions)));
+    const forest = buildSessionTree(sessions);
+    const withExternals = deps.resolveExternalParent
+      ? attachExternalParents(forest, deps.resolveExternalParent)
+      : forest;
+    const picked = await deps.pickFromTree(groupIdenticalRoots(withExternals));
     if (!picked) return; // escaped
     try {
       await deps.switchSession(picked);
