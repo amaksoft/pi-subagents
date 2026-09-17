@@ -4,6 +4,7 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { SlotLease } from "./domain/queue.js";
 import type { LifetimeUsage } from "./usage.js";
 
 export type { ThinkingLevel };
@@ -255,6 +256,12 @@ export interface AgentRecord {
   worktreeResult?: { hasChanges: boolean; branch?: string; path?: string; error?: string };
   /** Detach for the queued-abort parent-signal listener (see armQueuedAbort). */
   detachQueuedAbort?: () => void;
+  /**
+   * Pool slot this run holds, set at acquire time. Release consumes it —
+   * the pool is never recomputed at release, so a mid-run settings change
+   * cannot make the release disagree with the acquire (see domain/queue).
+   */
+  slotLease?: SlotLease;
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;
   /** Path to the streaming output transcript file. */

@@ -22,6 +22,15 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
+import {
+  acquireSlot,
+  emptyLedger,
+  poolHasRoom as ledgerHasRoom,
+  type Pool,
+  type PoolLedger,
+  releaseSlot as releaseLedgerSlot,
+  resolvePool,
+} from "./domain/queue.js";
 import { DEFAULT_STALL_THRESHOLD_MS, isStalled, isStoppableStatus, pushLiveOutput, touchActivity, touchOutput, trackToolActivity } from "./status-note.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
@@ -175,9 +184,6 @@ function occupiesForegroundSlot(
 ): boolean {
   return !!record.blocking && isTopLevelAgent(record);
 }
-
-/** Which concurrency pool a spawn is charged to, if any. */
-type Pool = "background" | "foreground";
 
 interface SpawnArgs {
   pi: ExtensionAPI;
@@ -390,8 +396,11 @@ export class AgentManager {
   private onStall?: OnAgentStall;
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
-  private maxConcurrent: number;
-  private maxConcurrentForeground = DEFAULT_MAX_CONCURRENT_FOREGROUND;
+  /**
+   * The pool ledger (see domain/queue.ts). Caps live here — getMaxConcurrent
+   * and friends read them — so admission and accounting share one struct.
+   */
+  private poolLedger = emptyLedger(DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_FOREGROUND);
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
@@ -430,10 +439,6 @@ export class AgentManager {
    * out.
    */
   private queue: { id: string; pool: Pool; start: () => Promise<void>; release: () => void }[] = [];
-  /** Number of currently running background agents. */
-  private runningBackground = 0;
-  /** Number of currently running foreground (blocking) agents. */
-  private runningForeground = 0;
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -450,7 +455,7 @@ export class AgentManager {
     this.onUsage = onUsage;
     this.onStop = onStop;
     this.onStall = onStall;
-    this.maxConcurrent = maxConcurrent;
+    this.poolLedger = emptyLedger(maxConcurrent, DEFAULT_MAX_CONCURRENT_FOREGROUND);
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
     this.cleanupInterval.unref();
@@ -458,26 +463,26 @@ export class AgentManager {
 
   /** Update the max concurrent background agents limit. */
   setMaxConcurrent(n: number) {
-    this.maxConcurrent = Math.max(1, n);
+    this.poolLedger = { ...this.poolLedger, maxBackground: Math.max(1, n) };
     // Start queued agents if the new limit allows
     this.drainQueue();
   }
 
   getMaxConcurrent(): number {
-    return this.maxConcurrent;
+    return this.poolLedger.maxBackground;
   }
 
   /** Update the max concurrent foreground (blocking) agents limit. 0 = unlimited. */
   setMaxConcurrentForeground(n: number) {
     // Floor 0, not 1: unlimited is a meaningful value here and the default.
-    this.maxConcurrentForeground = Math.max(0, n);
+    this.poolLedger = { ...this.poolLedger, maxForeground: Math.max(0, n) };
     // Start queued agents if the new limit allows — including everything, when
     // the limit is cleared back to unlimited mid-run.
     this.drainQueue();
   }
 
   getMaxConcurrentForeground(): number {
-    return this.maxConcurrentForeground;
+    return this.poolLedger.maxForeground;
   }
 
   /**
@@ -493,15 +498,14 @@ export class AgentManager {
    * is pinned in `test/foreground-concurrency.test.ts`.
    */
   private poolFor(record: AgentRecord): Pool | undefined {
-    if (occupiesPoolSlot(record)) return "background";
-    if (this.maxConcurrentForeground > 0 && occupiesForegroundSlot(record)) return "foreground";
-    return undefined;
+    return resolvePool(
+      { isBackground: record.isBackground, blocking: record.blocking, topLevel: isTopLevelAgent(record) },
+      this.poolLedger.maxForeground,
+    );
   }
 
   private poolHasRoom(pool: Pool): boolean {
-    return pool === "background"
-      ? this.runningBackground < this.maxConcurrent
-      : this.maxConcurrentForeground === 0 || this.runningForeground < this.maxConcurrentForeground;
+    return ledgerHasRoom(this.poolLedger, pool);
   }
 
   /**
@@ -750,14 +754,26 @@ export class AgentManager {
     // never reach `settleRun`, so they hand the slot back themselves.
     const pool = this.poolFor(record);
     const releaseSlot = () => {
-      if (pool === "background") this.runningBackground--;
-      else if (pool === "foreground") this.runningForeground--;
+      // Lease-carried release: the pool comes from acquire time, never from
+      // a recompute — a mid-run settings change cannot misdirect it.
+      if (record.slotLease !== undefined) {
+        this.poolLedger = releaseLedgerSlot(this.poolLedger, record.slotLease);
+        record.slotLease = undefined;
+      }
     };
     record.status = "running";
     record.startedAt = Date.now();
     record.startGate = undefined;
-    if (pool === "background") this.runningBackground++;
-    else if (pool === "foreground") this.runningForeground++;
+    if (pool !== undefined) {
+      // Room was checked at spawn/drain time; bypassQueue skips the check but
+      // still counts (transient overdraft, as before). The force fallback
+      // preserves the old unconditional increment for the synchronous sliver
+      // where room vanished between check and start.
+      const acquired = acquireSlot(this.poolLedger, pool, options.bypassQueue)
+        ?? acquireSlot(this.poolLedger, pool, true)!;
+      this.poolLedger = acquired.ledger;
+      record.slotLease = acquired.lease;
+    }
 
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done BEFORE
@@ -1057,8 +1073,13 @@ export class AgentManager {
    */
   private settleRun(record: AgentRecord, guardCallback: boolean, pool: Pool | undefined): void {
     if (!record.isBackground) record.resultConsumed = true;
-    if (pool === "background") this.runningBackground--;
-    else if (pool === "foreground") this.runningForeground--;
+    // Lease release is idempotent (cleared on use): the two startup exits
+    // that hand their slot back via releaseSlot() never reach here, and a
+    // record that never acquired (pool-less) carries no lease to free.
+    if (record.slotLease !== undefined) {
+      this.poolLedger = releaseLedgerSlot(this.poolLedger, record.slotLease);
+      record.slotLease = undefined;
+    }
 
     if (guardCallback) {
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
@@ -1381,7 +1402,18 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (occupiesPoolSlot(record)) this.runningBackground++;
+    // Resumes re-enter the pool like fresh starts (same lease discipline).
+    // Background-only, exactly as before: foreground resumes never held a
+    // slot, so poolFor's foreground branch must not apply here.
+    if (occupiesPoolSlot(record)) {
+      const acquired = acquireSlot(this.poolLedger, "background", true);
+      // Unconditional: a resume restarts work that already held a slot in a
+      // past life — like the bypass path, it counts even past the cap.
+      if (acquired !== undefined) {
+        this.poolLedger = acquired.ledger;
+        record.slotLease = acquired.lease;
+      }
+    }
     this.onStart?.(record);
 
     // Fresh abort controller so /agents stop and steering target THIS run rather
@@ -1413,7 +1445,10 @@ export class AgentManager {
       }
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
-      if (occupiesPoolSlot(record)) this.runningBackground--;
+      if (record.slotLease !== undefined) {
+        this.poolLedger = releaseLedgerSlot(this.poolLedger, record.slotLease);
+        record.slotLease = undefined;
+      }
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
     };
