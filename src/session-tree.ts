@@ -105,8 +105,17 @@ export function toggleExpanded(expanded: ReadonlySet<string>, path: string): Set
   return next;
 }
 
+/** Normalized searchable text per session, memoized: search re-runs per
+ * keystroke, and re-normalizing hundreds of first messages each time is the
+ * O(N) the picker cache above still pays without this. Sessions are stable
+ * for a picker's lifetime, so a WeakMap never goes stale here. */
+const normCache = new WeakMap<ResumeSession, string>();
 function rowText(session: ResumeSession): string {
-  return `${session.name?.trim() ?? ""} ${session.firstMessage}`.replace(/\s+/g, " ").trim().toLowerCase();
+  const hit = normCache.get(session);
+  if (hit !== undefined) return hit;
+  const norm = `${session.name?.trim() ?? ""} ${session.firstMessage}`.replace(/\s+/g, " ").trim().toLowerCase();
+  normCache.set(session, norm);
+  return norm;
 }
 
 /**
@@ -189,9 +198,15 @@ export function sanitizeRowText(text: string, maxLen = 80): string {
     .slice(0, maxLen);
 }
 
-/** Normalized first user message — the duplicate-grouping key. */
+/** Normalized first user message — the duplicate-grouping key. Memoized
+ * like rowText: grouping walks every root twice (bucket + rebuild). */
+const keyCache = new WeakMap<ResumeSession, string>();
 export function firstMessageKey(session: ResumeSession): string {
-  return session.firstMessage.replace(/\s+/g, " ").trim();
+  const hit = keyCache.get(session);
+  if (hit !== undefined) return hit;
+  const key = session.firstMessage.replace(/\s+/g, " ").trim();
+  keyCache.set(session, key);
+  return key;
 }
 
 /**

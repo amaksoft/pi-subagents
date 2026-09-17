@@ -41,8 +41,23 @@ export function createResumeTreePicker(
   let selected = 0;
   let filter = "";
 
-  const rows = (): TreeRow[] =>
-    filter.trim() ? searchRows(opts.roots, filter) : visibleRows(opts.roots, expanded);
+  // Row cache: tree walks + search normalization run once per (filter,
+  // expansion) state, not once per render/clamp/selection-read. A keypress
+  // otherwise pays O(N) normalization several times over.
+  let expandedVersion = 0;
+  let rowsCache: { filter: string; version: number; rows: TreeRow[] } | undefined;
+  const rows = (): TreeRow[] => {
+    if (rowsCache && rowsCache.filter === filter && rowsCache.version === expandedVersion) {
+      return rowsCache.rows;
+    }
+    const fresh = filter.trim() ? searchRows(opts.roots, filter) : visibleRows(opts.roots, expanded);
+    rowsCache = { filter, version: expandedVersion, rows: fresh };
+    return fresh;
+  };
+  const touchExpanded = (path: string) => {
+    expanded = toggleExpanded(expanded, path);
+    expandedVersion++;
+  };
 
   const clamp = (rs: TreeRow[]) => {
     selected = rs.length === 0 ? 0 : Math.max(0, Math.min(selected, rs.length - 1));
@@ -120,14 +135,14 @@ export function createResumeTreePicker(
         selected = Math.min(Math.max(0, rs.length - 1), selected + 1);
       } else if (matchesKey(data, "right")) {
         const row = rs[selected];
-        if (row?.isParent && !row.expanded) expanded = toggleExpanded(expanded, row.session.path);
+        if (row?.isParent && !row.expanded) touchExpanded(row.session.path);
       } else if (matchesKey(data, "left")) {
         const row = rs[selected];
-        if (row?.isParent && row.expanded) expanded = toggleExpanded(expanded, row.session.path);
+        if (row?.isParent && row.expanded) touchExpanded(row.session.path);
         else selectParent(rows());
       } else if (data === " " || matchesKey(data, "space")) {
         const row = rs[selected];
-        if (row?.isParent) expanded = toggleExpanded(expanded, row.session.path);
+        if (row?.isParent) touchExpanded(row.session.path);
       } else if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
         const rs = rows();
         // Empty list (filter matched nothing): no-op — the "No matches"
@@ -138,7 +153,7 @@ export function createResumeTreePicker(
         // Group rows expand instead of resuming: the pseudo-path is shared by
         // all members, so there is nothing unambiguous to switch to.
         if (row?.isGroup) {
-          expanded = toggleExpanded(expanded, row.session.path);
+          touchExpanded(row.session.path);
         } else {
           done(row?.session.path);
         }

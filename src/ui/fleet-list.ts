@@ -66,6 +66,8 @@ export interface FleetWorkflow {
   tokens: number;
   /** Live stalled children, counted by the mapper (absent = today's look). */
   stalledCount?: number;
+  /** Live snoozed children, counted by the mapper (absent = today's look). */
+  snoozedCount?: number;
 }
 
 type MainEntry = { kind: "main" };
@@ -95,14 +97,19 @@ export function describeFleetActivity(
   thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
 ): string | undefined {
   if (record.status !== "running" && record.status !== "queued") return undefined;
+  // A snoozed agent is quiet by request, not by neglect — badge it so the
+  // judge does not mistake the missing stall text for health *or* trouble.
+  const snoozed = record.snoozedUntil !== undefined && now < record.snoozedUntil
+    ? ` · snoozed ${formatActivityAge(record.snoozedUntil - now)} left`
+    : "";
   // Every heartbeat clears stalledSince, so a set flag always means silence
   // since the sweep ran — no stale-flag case to handle here.
   const stall = describeStall(record, now, thresholdMs);
-  if (stall) return stall;
+  if (stall) return stall; // unreachable while snoozed (isStalled gates on it)
   if (record.currentTool) {
-    return `▸ ${record.currentTool.name} ${formatActivityAge(now - record.currentTool.startedAt)}`;
+    return `▸ ${record.currentTool.name} ${formatActivityAge(now - record.currentTool.startedAt)}${snoozed}`;
   }
-  return undefined;
+  return snoozed ? `idle${snoozed}` : undefined;
 }
 
 /** `↓ 13.1k tokens` — down-arrow prefix, compact magnitude, plural "tokens". */
@@ -277,10 +284,11 @@ export class FleetList {
 
   /**
    * Agents shown in the list, ordered earliest-launched first so the ones you
-   * started sooner sit at the top. Every row is openable (has a session), so Enter
-   * never dead-ends. Included: running/queued, plus the agent currently being
-   * viewed, plus recently-finished ones (they linger briefly before dropping out).
-   * Pending agents with no session yet are hidden until they start.
+   * started sooner sit at the top. Included: running/queued (stoppable rows
+   * show even before their session exists, so quick-stop reaches them —
+   * Enter on such a row dead-ends with a "no session" note instead),
+   * plus the agent currently being viewed, plus recently-finished ones
+   * (they linger briefly before dropping out, session required to view).
    * (`listAgents()` is newest-first, so we re-sort.)
    */
   private agentRecords(): AgentRecord[] {
@@ -621,7 +629,8 @@ export class FleetList {
     const elapsed = (workflow.completedAt ?? Date.now()) - workflow.startedAt;
     const agents = `${workflow.doneCount}/${workflow.totalCount} agent${workflow.totalCount === 1 ? "" : "s"}`;
     const stalled = workflow.stalledCount ? ` · ${workflow.stalledCount} stalled` : "";
-    const stats = `${agents} · ${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}${stalled}`;
+    const snoozed = workflow.snoozedCount ? ` · ${workflow.snoozedCount} snoozed` : "";
+    const stats = `${agents} · ${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}${stalled}${snoozed}`;
     return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
   }
 

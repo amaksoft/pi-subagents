@@ -66,6 +66,7 @@ import { SPINNER, type Theme } from "./agent-widget.js";
 import {
   ASCII_GLYPHS,
   clampLine,
+  countSnoozedAgents,
   countStalledAgents,
   formatCompactTokens,
   formatModel,
@@ -711,7 +712,10 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   const stalledCount = input.getAgentRecord
     ? countStalledAgents(input.progress, input.getAgentRecord, now, input.stallThresholdMs)
     : 0;
-  const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, now, stalledCount);
+  const snoozedCount = input.getAgentRecord
+    ? countSnoozedAgents(input.progress, input.getAgentRecord, now)
+    : 0;
+  const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, now, stalledCount, snoozedCount);
   lines.push(clampLine([{ text: " " }, { text: head.name, color: "toolTitle", bold: true }], width));
   lines.push(
     rightAlign(

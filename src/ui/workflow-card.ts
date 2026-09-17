@@ -165,6 +165,8 @@ export interface WorkflowCardInput {
   agentCount?: number;
   /** Live stalled children, counted by the caller (see countStalledAgents). */
   stalledCount?: number;
+  /** Live snoozed children, counted by the caller (see countSnoozedAgents). */
+  snoozedCount?: number;
   /** Total tokens for the size warning; summed from the entries when omitted. */
   totalTokens?: number;
   agentCap?: number;
@@ -321,6 +323,22 @@ export function countStalledAgents(
   return count;
 }
 
+/** Live snoozed children for a run's header/fleet rows. Same join shape as
+ * countStalledAgents: worker entries against live manager records. */
+export function countSnoozedAgents(
+  entries: readonly WorkflowEntry[],
+  getRecord: (recordId: string) => AgentRecord | undefined,
+  now = Date.now(),
+): number {
+  let count = 0;
+  for (const entry of entries) {
+    if (entry.type !== "workflow_agent" || !entry.recordId) continue;
+    const record = getRecord(entry.recordId);
+    if (record?.status === "running" && record.snoozedUntil !== undefined && now < record.snoozedUntil) count++;
+  }
+  return count;
+}
+
 /** One-line stall diagnosis for a dialog agent row, or undefined. */
 export function stallAnnotation(
   entry: WorkflowAgentEntry,
@@ -346,7 +364,7 @@ export function layoutWorkflowCard(input: WorkflowCardInput): WorkflowCardLine[]
   const groups = buildPhaseGroups(input.progress, input.meta?.phases);
   const { agents, logs } = collapse(input.progress);
   const totals = stats(input.progress, input.agentCount ?? 0);
-  const head = header(input.task, input.meta, groups, input.agentCount ?? 0, now, input.stalledCount ?? 0);
+  const head = header(input.task, input.meta, groups, input.agentCount ?? 0, now, input.stalledCount ?? 0, input.snoozedCount ?? 0);
 
   const lines: WorkflowCardLine[] = [];
 

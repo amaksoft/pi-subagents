@@ -156,24 +156,24 @@ describe("groupCompletionLabel", () => {
   it("says finished when every member completed", () => {
     expect(groupCompletionLabel(
       [{ status: "completed" }, { status: "completed" }] as AgentRecord[], false,
-    )).toBe("2 agent(s) finished");
+    )).toBe("2 agents finished");
   });
 
   it("marks partial when a member was stopped", () => {
     expect(groupCompletionLabel(
       [{ status: "completed" }, { status: "stopped" }] as AgentRecord[], false,
-    )).toBe("2 agent(s) finished (1 stopped)");
+    )).toBe("1 agent finished, 1 stopped");
   });
 
   it("marks partial when members did not complete for mixed reasons", () => {
     expect(groupCompletionLabel(
       [{ status: "completed" }, { status: "stopped" }, { status: "error" }] as AgentRecord[], false,
-    )).toBe("3 agent(s) finished (partial — 2 did not complete)");
+    )).toBe("1 agent finished, 1 stopped, 1 unfinished");
   });
 
   it("keeps the still-running wording for partial deliveries", () => {
     expect(groupCompletionLabel(
       [{ status: "completed" }, { status: "stopped" }] as AgentRecord[], true,
-    )).toBe("2 agent(s) finished (partial — others still running)");
+    )).toBe("2 agents done (partial — others still running)");
   });
 });

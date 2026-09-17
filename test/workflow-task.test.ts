@@ -226,3 +226,19 @@ describe("workflow budget overflow guard", () => {
     disarmWorkflowTimeout(task);
   });
 });
+
+describe("settled run eviction", () => {
+  it("evicts oldest settled past the cap, never live runs", async () => {
+    const { selectSettledEvictions } = await import("../src/workflow/task.js");
+    const tasks = [
+      { id: "old-settled", status: "completed", startTime: 1000 },
+      { id: "live", status: "running", startTime: 500 },
+      { id: "paused", status: "paused", startTime: 100 },
+      { id: "new-settled", status: "failed", startTime: 2000 },
+    ] as any;
+    expect(selectSettledEvictions(tasks, 10)).toEqual([]);
+    expect(selectSettledEvictions(tasks, 1)).toEqual(["old-settled"]);
+    expect(selectSettledEvictions(tasks, 0)).toEqual(["old-settled", "new-settled"]);
+    expect(selectSettledEvictions([], 5)).toEqual([]);
+  });
+});

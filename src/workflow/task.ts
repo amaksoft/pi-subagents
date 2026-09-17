@@ -173,6 +173,20 @@ export function updateWorkflowProgressBatch(
   task.doneCount = done;
 }
 
+/**
+ * Ids of settled runs past the retention cap, oldest first. Pure — the
+ * caller deletes (plus per-task caches). Running/paused runs are exempt.
+ */
+export function selectSettledEvictions(
+  tasks: readonly Pick<WorkflowTask, "id" | "status" | "startTime">[],
+  maxKept: number,
+): string[] {
+  const settled = tasks
+    .filter(t => t.status !== "running" && t.status !== "paused")
+    .sort((a, b) => a.startTime - b.startTime);
+  return settled.slice(0, Math.max(0, settled.length - maxKept)).map(t => t.id);
+}
+
 /** Active (unpaused) run time in ms — what the wall-clock budget consumes. */
 export function activeElapsedMs(task: WorkflowTask, now = Date.now()): number {
   return Math.max(

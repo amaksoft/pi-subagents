@@ -964,8 +964,10 @@ export class AgentManager {
           } else if (wtResult.error) {
             // Cleanup failed mid-flight: the copy is preserved (see path) and
             // the parent must know the work is stranded, not merged.
-            record.result = (record.result ?? "") +
-              `\n\n---\nWorktree cleanup failed (${wtResult.error}); uncommitted work preserved at \`${wtResult.path ?? "unknown path"}\`.`;
+            // Prepended, not appended: completion notifications preview the
+            // FIRST 500 chars, so an appended warning would be truncated
+            // away exactly when it matters most.
+            record.result = `⚠ Worktree cleanup failed (${wtResult.error}); uncommitted work preserved at \`${wtResult.path ?? "unknown path"}\`.\n\n---\n\n` + (record.result ?? "");
           }
         }
 

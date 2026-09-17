@@ -12,17 +12,23 @@ export type DeliveryCallback = (records: AgentRecord[], partial: boolean) => voi
 
 /**
  * Envelope label for a grouped completion notification. Status-aware: a group
- * whose members did not all complete says so, instead of a blanket "finished".
+ * whose members did not all complete says so — stopped and partial groups never read as plain "finished", and counts render without literal "(s)" suffixes.
  */
-export function groupCompletionLabel(unconsumed: Pick<AgentRecord, "status">[], partial: boolean): string {
-  const incomplete = unconsumed.filter(r => r.status !== "completed").length;
-  if (partial) return `${unconsumed.length} agent(s) finished (partial — others still running)`;
-  const stopped = unconsumed.filter(r => r.status === "stopped").length;
-  if (incomplete > 0 && stopped === incomplete) return `${unconsumed.length} agent(s) finished (${stopped} stopped)`;
-  if (incomplete > 0) return `${unconsumed.length} agent(s) finished (partial — ${incomplete} did not complete)`;
-  return `${unconsumed.length} agent(s) finished`;
-}
+const pluralAgents = (n: number) => (n === 1 ? "1 agent" : `${n} agents`);
 
+export function groupCompletionLabel(unconsumed: Pick<AgentRecord, "status">[], partial: boolean): string {
+  // Per-outcome counts, never a blanket "finished": a stopped member is not
+  // finished, and the old literal "(s)" suffixes read as unrendered templates.
+  if (partial) return `${pluralAgents(unconsumed.length)} done (partial — others still running)`;
+  const done = unconsumed.filter(r => r.status === "completed").length;
+  const stopped = unconsumed.filter(r => r.status === "stopped").length;
+  const other = unconsumed.length - done - stopped;
+  const parts: string[] = [];
+  if (done > 0) parts.push(`${pluralAgents(done)} finished`);
+  if (stopped > 0) parts.push(`${stopped} stopped`);
+  if (other > 0) parts.push(`${other} unfinished`);
+  return parts.join(", ");
+}
 interface AgentGroup {
   groupId: string;
   agentIds: Set<string>;

@@ -62,7 +62,7 @@ import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.
 import { createResumeTreePicker } from "./ui/resume-tree-picker.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
-import { countStalledAgents, renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
+import { countSnoozedAgents, countStalledAgents, renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
 import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
@@ -73,7 +73,7 @@ import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/met
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
-import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, MAX_TIMEOUT_MS, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, MAX_TIMEOUT_MS, resolveResumeTarget, selectSettledEvictions, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -659,6 +659,11 @@ export default function (pi: ExtensionAPI) {
     if (!isTopLevelAgent(record)) return;
     const diagnosis = describeStall(record, Date.now(), manager.getStallThresholdMs()) ?? "stalled";
     pi.events.emit("subagents:stalled", buildEventData(record));
+    // Armed auto-abort stops the agent in this same sweep, and that path
+    // notifies with the STOPPED outcome — sending the advisory nudge too
+    // would double-page every episode. abort() on a live running record
+    // cannot fail, so skipping here never loses the signal.
+    if (manager.isStallAutoAbort()) return;
     const footer = record.outputFile ? `\nPartial transcript so far: ${record.outputFile}` : "";
     pi.sendMessage({
       customType: "subagent-notification",
@@ -2356,12 +2361,37 @@ Terse command-style prompts produce shallow, generic work.
    * the progress log rather than on the record, so they are derived per call
    * the same way the card derives them.
    */
+  /** Live workflow tasks retained in memory; settled ones evicted past this. */
+  const MAX_SETTLED_WORKFLOWS = 50;
+
+  // Stalled-child counts, cached per task revision: the fleet list calls the
+  // mapping several times per 200ms tick, and without this each call re-walks
+  // every run's progress log. Keyed on progressVersion (bumped per batch) +
+  // threshold, so a settings change cannot serve a stale count.
+  const childStateCache = new Map<string, { version: number; threshold: number; stalled: number; snoozed: number }>();
+  function cachedChildStates(task: WorkflowTask): { stalled: number; snoozed: number } {
+    const threshold = manager.getStallThresholdMs();
+    const getRecord = (id: string) => manager.getRecord(id);
+    const now = Date.now();
+    const hit = childStateCache.get(task.id);
+    if (hit && hit.version === task.progressVersion && hit.threshold === threshold) {
+      return { stalled: hit.stalled, snoozed: hit.snoozed };
+    }
+    const states = {
+      stalled: countStalledAgents(task.workflowProgress, getRecord, now, threshold),
+      snoozed: countSnoozedAgents(task.workflowProgress, getRecord, now),
+    };
+    if (childStateCache.size > 500) childStateCache.clear();
+    childStateCache.set(task.id, { version: task.progressVersion, threshold, ...states });
+    return states;
+  }
   function fleetWorkflows(): FleetWorkflow[] {
     // Cached counters only, no derivation: the fleet list calls this on a
     // 200ms tick and reads the roster several times per update, so walking a
     // run's progress log here would put O(log) work in the render loop.
-    // countStalledAgents is the deliberate exception: it joins worker entries
-    // against live manager records (O(live agents)), never the log.
+    // cachedStalledCount is the deliberate exception: version-keyed, so
+    // repeated reads within one batch are free and log walks happen at most
+    // once per progress batch per run.
     return [...workflowTasks.values()].map(task => ({
       id: task.id,
       name: task.meta?.name ?? task.workflowName ?? task.id,
@@ -2371,7 +2401,8 @@ Terse command-style prompts produce shallow, generic work.
       startedAt: task.startTime,
       ...(task.endTime !== undefined ? { completedAt: task.endTime } : {}),
       tokens: task.totalTokens,
-      stalledCount: countStalledAgents(task.workflowProgress, (id) => manager.getRecord(id), Date.now(), manager.getStallThresholdMs()),
+      stalledCount: cachedChildStates(task).stalled,
+      snoozedCount: cachedChildStates(task).snoozed,
     }));
   }
 
@@ -2446,11 +2477,23 @@ Terse command-style prompts produce shallow, generic work.
         },
       }, { deliverAs: "followUp", triggerTurn: true });
     });
+    evictSettledWorkflows();
   }
 
-  // Defined unconditionally, registered only when the feature is on — the same
-  // shape the Agent tool uses. Keeping the definition out of the `if` means the
-  // switch changes exactly one thing: whether pi is ever told about the tool.
+  /**
+   * Bound in-session retention for settled runs and their append-only logs.
+   * A long session that fans out repeatedly would otherwise accumulate every
+   * run's full progress log in memory forever. Running/paused runs are never
+   * touched; journal files stay on disk (resume still works), only the live
+   * task objects go. Surfaces that hold an id (dialog, transcript render)
+   * already treat a missing task as settled-and-swept rather than crashing.
+   */
+  function evictSettledWorkflows(): void {
+    for (const id of selectSettledEvictions([...workflowTasks.values()], MAX_SETTLED_WORKFLOWS)) {
+      workflowTasks.delete(id);
+      childStateCache.delete(id);
+    }
+  }
   const workflowTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.WORKFLOW,
     label: "SubagentWorkflow",
@@ -2539,7 +2582,8 @@ Terse command-style prompts produce shallow, generic work.
           agentCount: task.agentCount,
           totalTokens: task.totalTokens,
           // One-shot snapshot for a static result (the dialog stays live).
-          stalledCount: countStalledAgents(task.workflowProgress, (id) => manager.getRecord(id), Date.now(), manager.getStallThresholdMs()),
+          stalledCount: cachedChildStates(task).stalled,
+          snoozedCount: cachedChildStates(task).snoozed,
         },
         theme,
       );
@@ -2595,9 +2639,18 @@ Terse command-style prompts produce shallow, generic work.
       // unlimited (0/negative cannot mean "kill immediately" — that would
       // turn a typo into a run that can never start). Capped so the ms value
       // cannot overflow setTimeout (~24.8 days) into an instant kill.
-      const timeoutMs = typeof params.timeout === "number" && Number.isFinite(params.timeout) && params.timeout > 0
-        ? Math.min(Math.round(params.timeout * 60_000), MAX_TIMEOUT_MS)
-        : undefined;
+      // Invalid-but-present values warn instead of failing: the run is valid,
+      // only its budget is malformed, and failing the call would cost a turn
+      // to re-emit an identical script.
+      let timeoutMs: number | undefined;
+      if (params.timeout === undefined) {
+        timeoutMs = undefined;
+      } else if (typeof params.timeout === "number" && Number.isFinite(params.timeout) && params.timeout > 0) {
+        timeoutMs = Math.min(Math.round(params.timeout * 60_000), MAX_TIMEOUT_MS);
+      } else {
+        console.warn(`[pi-subagents] ignoring invalid workflow timeout: ${JSON.stringify(params.timeout)}`);
+        timeoutMs = undefined;
+      }
       const task = createWorkflowTask({
         id: runId,
         script: resolved.script,
@@ -2612,7 +2665,14 @@ Terse command-style prompts produce shallow, generic work.
       workflowTasks.set(runId, task);
       // Budget starts now: expiry aborts through the normal kill path, and
       // the settle below rewrites the generic abort error with the cause.
+      // Guarded: an expiry landing in the same tick as natural completion
+      // must not kill a finished run and discard its value — if the task
+      // already settled, the result stands and the fired flag is withdrawn.
       armWorkflowTimeout(task, () => {
+        if (task.status !== "running") {
+          task.timeoutFired = false;
+          return;
+        }
         task.abortController.abort();
       });
       // The run's own row has to appear now, not when it settles. Its agents
@@ -3841,7 +3901,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "stallAutoAbort",
           label: "Stall auto-abort",
-          description: "Abort running agents silent past the stall threshold (10min default, stallThresholdMs in subagents.json). Off by default — a timer must never kill slow-but-alive work by surprise. Stops flow through the normal path with a STOPPED note.",
+          description: "Abort silent agents past the stall threshold (stallThresholdMs in subagents.json, default 10m). Off by default. Top-level running agents only — queued, nested, workflow children and snoozed agents are exempt. Stops flow through the normal path with a STOPPED note.",
           currentValue: manager.isStallAutoAbort() ? "on" : "off",
           values: ["on", "off"],
         },

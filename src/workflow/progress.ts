@@ -404,6 +404,7 @@ export function header(
   agentCount: number,
   now: number,
   stalledCount = 0,
+  snoozedCount = 0,
 ): WorkflowHeader {
   const suffix =
     task.status === "completed" ? " · done"
@@ -423,7 +424,7 @@ export function header(
   return {
     name: task.workflowName ?? meta?.name ?? task.summary ?? task.description ?? "workflow",
     subtext: meta?.description ?? task.description ?? task.summary ?? "",
-    stats: `${doneAgents}/${totalAgents} ${plural(totalAgents, "agent")} · ${formatDuration(elapsedMs(task, now))}${suffix}${stalledCount > 0 ? ` · ${stalledCount} stalled` : ""}`,
+    stats: `${doneAgents}/${totalAgents} ${plural(totalAgents, "agent")} · ${formatDuration(elapsedMs(task, now))}${suffix}${stalledCount > 0 ? ` · ${stalledCount} stalled` : ""}${snoozedCount > 0 ? ` · ${snoozedCount} snoozed` : ""}`,
   };
 }
 

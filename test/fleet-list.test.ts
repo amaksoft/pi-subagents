@@ -1025,3 +1025,12 @@ describe("FleetList session-less rows", () => {
     expect(notices.some(m => m.includes("no session"))).toBe(true);
   });
 });
+
+describe("FleetList snoozed rows", () => {
+  it("badges a snoozed running agent with the remaining window", () => {
+    const now = Date.now();
+    const h = harness([makeRecord({ id: "a1", description: "slow", snoozedUntil: now + 8 * 60_000 } as any)]);
+    const rows = h.render().map(plain).join("\n");
+    expect(rows).toContain("snoozed 8m left");
+  });
+});
