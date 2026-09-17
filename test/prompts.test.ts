@@ -487,3 +487,43 @@ describe("buildAgentPrompt", () => {
     });
   });
 });
+
+describe("subagent timeout guidance", () => {
+  const env = { isGitRepo: false, branch: "", platform: "linux" } as any;
+
+  it("append bridge tells agents to bound shell/network calls", () => {
+    const config = {
+      name: "x",
+      description: "x",
+      builtinToolNames: ["bash"],
+      extensions: false,
+      skills: false,
+      systemPrompt: "",
+      promptMode: "append",
+      inheritContext: false,
+      runInBackground: false,
+      isolated: false,
+    } as any;
+    const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.");
+    expect(prompt).toContain("timeout 120");
+    expect(prompt).toContain("curl --max-time 60");
+  });
+
+  it("replace mode carries the same guidance", () => {
+    const config = {
+      name: "x",
+      description: "x",
+      builtinToolNames: ["bash"],
+      extensions: false,
+      skills: false,
+      systemPrompt: "Do the thing.",
+      promptMode: "replace",
+      inheritContext: false,
+      runInBackground: false,
+      isolated: false,
+    } as any;
+    const prompt = buildAgentPrompt(config, "/workspace", env);
+    expect(prompt).toContain("timeout 120");
+    expect(prompt).toContain("curl --max-time 60");
+  });
+});

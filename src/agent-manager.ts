@@ -22,7 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import { isStalled, isStoppableStatus, touchActivity, trackToolActivity } from "./status-note.js";
+import { DEFAULT_STALL_THRESHOLD_MS, isStalled, isStoppableStatus, touchActivity, trackToolActivity } from "./status-note.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
@@ -32,6 +32,8 @@ export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
 /** Fired exactly once per successful abort(), queued or running. */
 export type OnAgentStop = (record: AgentRecord) => void;
+/** Fired once per stall episode, when the sweep first flags a silent agent. */
+export type OnAgentStall = (record: AgentRecord) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
 /**
  * Fired once per assistant `message_end`, for EVERY agent this manager owns —
@@ -385,6 +387,7 @@ export class AgentManager {
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
   private onStop?: OnAgentStop;
+  private onStall?: OnAgentStall;
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
   private maxConcurrent: number;
@@ -439,12 +442,14 @@ export class AgentManager {
     onCompact?: OnAgentCompact,
     onUsage?: OnAgentUsage,
     onStop?: OnAgentStop,
+    onStall?: OnAgentStall,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
     this.onCompact = onCompact;
     this.onUsage = onUsage;
     this.onStop = onStop;
+    this.onStall = onStall;
     this.maxConcurrent = maxConcurrent;
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
@@ -1579,23 +1584,63 @@ export class AgentManager {
     }
   }
 
+  /** Stall silence threshold. Injectable for tests; production default is the shared 10 minutes. */
+  private stallThresholdMs = DEFAULT_STALL_THRESHOLD_MS;
+  /** Abort running agents silent past the threshold. Default off (see settings). */
+  private stallAutoAbort = false;
+
+  /** Override the stall threshold (tests, future settings). */
+  setStallThresholdMs(ms: number) {
+    this.stallThresholdMs = Math.max(1, ms);
+  }
+
+  /** Opt into aborting stalled runners. Default off. */
+  setStallAutoAbort(b: boolean) {
+    this.stallAutoAbort = b;
+  }
+
+  /** Current auto-abort arming (settings menu display). */
+  isStallAutoAbort(): boolean {
+    return this.stallAutoAbort;
+  }
+
+  /** Current stall threshold (settings snapshot). */
+  getStallThresholdMs(): number {
+    return this.stallThresholdMs;
+  }
+
   private cleanup() {
     const now = Date.now();
     const cutoff = now - 10 * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") {
-        // Stall sweep (same 60s cadence): flag silence, never act on it.
-        // Acting (auto-abort) is deliberately a later, opt-in step — a slow
-        // but alive agent must not be killed by a timer. The flag tells the
-        // human/model surfaces (FleetView, get_subagent_result) WHEN to reach
-        // for the existing stop_subagent kill switch.
-        if (record.stalledSince === undefined && isStalled(record, now)) {
-          record.stalledSince = now;
-        }
+        this.sweepStall(id, record, now);
         continue;
       }
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
+    }
+  }
+
+  /**
+   * Flag one silent runner and notify once per episode. Public for tests;
+   * production calls it from the 60s cleanup sweep. Any heartbeat clears
+   * stalledSince, which re-arms the next episode — no throttle bookkeeping.
+   *
+   * With auto-abort armed (opt-in, running records only — queued silence is
+   * waiting, never wedging), the abort follows the nudge in the same sweep
+   * through the normal stop path, so the STOPPED note + notification carry
+   * the story. Queued records are flagged for visibility but never aborted.
+   */
+  sweepStall(id: string, record: AgentRecord, now = Date.now()) {
+    if (record.stalledSince !== undefined) return;
+    if (!isStalled(record, now, this.stallThresholdMs)) return;
+    record.stalledSince = now;
+    try {
+      this.onStall?.(record);
+    } catch { /* ignore stall side-effect errors */ }
+    if (this.stallAutoAbort && record.status === "running") {
+      this.abort(id);
     }
   }
 

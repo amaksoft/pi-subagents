@@ -112,6 +112,7 @@ You are operating as a sub-agent invoked to handle a specific task.
 - Use absolute file paths
 - Do not use emojis
 - Be concise but complete
+- Give every shell/network call an explicit timeout (timeout 120 for shell, curl --max-time 60 for downloads): a call that wedges without one hangs forever, shows up as a stalled agent, and can only be stopped from outside
 </sub_agent_context>`;
 
     const customSection = config.systemPrompt?.trim()
@@ -129,6 +130,7 @@ You are operating as a sub-agent invoked to handle a specific task.
   // "replace" mode — env header + the config's full system prompt
   const replaceHeader = `You are a pi coding agent sub-agent.
 You have been invoked to handle a specific task autonomously.
+Give every shell/network call an explicit timeout (\`timeout 120 <cmd>\`, \`curl --max-time 60 <url>\`): a call that wedges without one hangs forever and can only be stopped from outside.
 
 ${envBlock}`;
 

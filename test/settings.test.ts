@@ -144,6 +144,24 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
+  it("round-trips stallAutoAbort; drops non-boolean", () => {
+    saveSettings({ stallAutoAbort: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ stallAutoAbort: true });
+    writeProject({ stallAutoAbort: "yes" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
+  it("clamps stallThresholdMs to [1min, 24h], drops non-numbers", () => {
+    saveSettings({ stallThresholdMs: 5 * 60_000 }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ stallThresholdMs: 5 * 60_000 });
+    writeProject({ stallThresholdMs: 1000 } as any);
+    expect(loadSettings(projectDir)).toEqual({ stallThresholdMs: 60_000 });
+    writeProject({ stallThresholdMs: 99 * 3600_000 } as any);
+    expect(loadSettings(projectDir)).toEqual({ stallThresholdMs: 24 * 3600_000 });
+    writeProject({ stallThresholdMs: "ten minutes" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("round-trips widgetMode; keeps valid values, drops invalid", () => {
     saveSettings({ widgetMode: "off" }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ widgetMode: "off" });
@@ -546,6 +564,8 @@ describe("settings persistence", () => {
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
       setRememberAgents: vi.fn(),
+        setStallThresholdMs: vi.fn(),
+        setStallAutoAbort: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
@@ -579,6 +599,12 @@ describe("settings persistence", () => {
       applySettings({ reportUsage: false, showCost: false }, appliers);
       expect(appliers.setReportUsage).toHaveBeenCalledWith(false);
       expect(appliers.setShowCost).toHaveBeenCalledWith(false);
+    });
+
+it("applies stall settings when present, skips when absent", () => {
+      applySettings({ stallThresholdMs: 300_000, stallAutoAbort: true }, appliers);
+      expect(appliers.setStallThresholdMs).toHaveBeenCalledWith(300_000);
+      expect(appliers.setStallAutoAbort).toHaveBeenCalledWith(true);
     });
 
     it("applies showModel", () => {
@@ -797,6 +823,8 @@ describe("settings persistence", () => {
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
       setRememberAgents: vi.fn(),
+        setStallThresholdMs: vi.fn(),
+        setStallAutoAbort: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),

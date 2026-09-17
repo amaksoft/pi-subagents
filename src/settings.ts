@@ -153,6 +153,20 @@ export interface SubagentsSettings {
    */
   rememberAgents?: boolean;
   /**
+   * Silence threshold for stall detection (see status-note.ts). Defaults to
+   * 10 minutes. Clamped to [1min, 24h] on load. Takes effect through the
+   * manager's 60s sweep — no restart needed beyond the settings reload.
+   */
+  stallThresholdMs?: number;
+  /**
+   * Abort running agents silent past `stallThresholdMs`. Defaults to `false`:
+   * a timer must never kill a slow-but-alive agent by surprise. When on, the
+   * abort flows through the normal stop path (STOPPED note + notification),
+   * right after the stall nudge, so the parent always learns why it stopped.
+   * Queued agents are never affected — their silence is waiting, not wedging.
+   */
+  stallAutoAbort?: boolean;
+  /**
    * Display mode for the persistent above-editor agent widget:
    *   - `all`: show every agent (foreground + background).
    *   - `background`: hide foreground agents — they already render inline as the
@@ -322,6 +336,8 @@ export interface SettingsAppliers {
   setFleetView: (b: boolean) => void;
   setAgentMentions: (mode: AgentMentionMode) => void;
   setRememberAgents: (b: boolean) => void;
+  setStallThresholdMs: (ms: number) => void;
+  setStallAutoAbort: (b: boolean) => void;
   setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
   setWorktreeIsolation: (b: boolean) => void;
@@ -427,6 +443,16 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.rememberAgents === "boolean") {
     out.rememberAgents = r.rememberAgents;
   }
+  // Stall auto-abort threshold: clamp hand-edited values to [1min, 24h].
+  // Below a minute the sweep would race ordinary model latency; the ceiling
+  // keeps a typo from silently disabling the feature (not from enabling
+  // anything — auto-abort itself defaults off regardless of threshold).
+  if (typeof r.stallThresholdMs === "number" && Number.isFinite(r.stallThresholdMs)) {
+    out.stallThresholdMs = Math.max(60_000, Math.min(24 * 3600_000, Math.round(r.stallThresholdMs)));
+  }
+  if (typeof r.stallAutoAbort === "boolean") {
+    out.stallAutoAbort = r.stallAutoAbort;
+  }
   if (typeof r.widgetMode === "string" && VALID_WIDGET_MODES.has(r.widgetMode)) {
     out.widgetMode = r.widgetMode as WidgetMode;
   }
@@ -529,6 +555,8 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.agentMentions) appliers.setAgentMentions(s.agentMentions);
   if (typeof s.rememberAgents === "boolean") appliers.setRememberAgents(s.rememberAgents);
+  if (typeof s.stallThresholdMs === "number") appliers.setStallThresholdMs(s.stallThresholdMs);
+  if (typeof s.stallAutoAbort === "boolean") appliers.setStallAutoAbort(s.stallAutoAbort);
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
   if (typeof s.worktreeIsolation === "boolean") appliers.setWorktreeIsolation(s.worktreeIsolation);

@@ -19,6 +19,7 @@ vi.mock("../src/worktree.js", () => ({
 }));
 
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { touchActivity } from "../src/status-note.js";
 import { addUsage } from "../src/usage.js";
 import { isWorktreeIsolationEnabled } from "../src/worktree.js";
 
@@ -2978,5 +2979,151 @@ describe("AgentManager activity heartbeat (stall visibility)", () => {
 
     resolveRun({ responseText: "done", session: mockSession(), aborted: false, steered: false });
     await record.promise;
+  });
+});
+
+describe("AgentManager stall sweep (proactive nudge)", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  function silentRecord() {
+    manager = new AgentManager();
+    manager.setStallThresholdMs(1);
+    let captured: any;
+    vi.mocked(runAgent).mockImplementation(async (_c, _t, _p, opts: any) => {
+      captured = opts;
+      // Never settle: the run stays "running" while the sweep inspects it.
+      await new Promise(() => {});
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "silent",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    // Age the heartbeat past the 1ms threshold.
+    record.lastActivityAt = Date.now() - 1000;
+    return { id, record, getOpts: () => captured };
+  }
+
+  it("flags once and fires onStall once per episode", async () => {
+    const seen: string[] = [];
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, undefined, (r) => {
+      seen.push(r.id);
+    });
+    manager.setStallThresholdMs(1);
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise(() => {});
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "silent", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await new Promise((r) => setTimeout(r, 0));
+    record.lastActivityAt = Date.now() - 1000;
+
+    manager.sweepStall(id, record);
+    expect(record.stalledSince).toBeDefined();
+    expect(seen).toEqual([id]);
+    // Second sweep: no refire while the flag stands.
+    manager.sweepStall(id, record);
+    expect(seen).toEqual([id]);
+    manager.dispose();
+  });
+
+  it("activity re-arms the next episode", () => {
+    const { id, record } = silentRecord();
+    const seen: string[] = [];
+    (manager as any).onStall = (r: AgentRecord) => {
+      seen.push(r.id);
+    };
+    manager.sweepStall(id, record);
+    expect(seen).toHaveLength(1);
+    // A heartbeat clears the flag…
+    touchActivity(record);
+    expect(record.stalledSince).toBeUndefined();
+    // …so the next silence notifies again.
+    record.lastActivityAt = Date.now() - 1000;
+    manager.sweepStall(id, record);
+    expect(seen).toHaveLength(2);
+  });
+
+  it("never flags settled records", () => {
+    const { id, record } = silentRecord();
+    record.status = "completed";
+    record.lastActivityAt = 0;
+    manager.sweepStall(id, record);
+    expect(record.stalledSince).toBeUndefined();
+  });
+});
+
+describe("AgentManager stall auto-abort (opt-in)", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("is off by default: sweep flags but never aborts", async () => {
+    manager = new AgentManager();
+    expect(manager.isStallAutoAbort()).toBe(false);
+    manager.setStallThresholdMs(1);
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise(() => {});
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "s", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await new Promise((r) => setTimeout(r, 0));
+    record.lastActivityAt = Date.now() - 1000;
+    manager.sweepStall(id, record);
+    expect(record.stalledSince).toBeDefined();
+    expect(record.status).toBe("running");
+  });
+
+  it("armed: sweep aborts a silent runner through the stop path", async () => {
+    const stopped2: string[] = [];
+    const stalled: string[] = [];
+    manager = new AgentManager(
+      undefined, undefined, undefined, undefined, undefined,
+      (r) => { stopped2.push(r.id); },
+      (r) => { stalled.push(r.id); },
+    );
+    manager.setStallThresholdMs(1);
+    manager.setStallAutoAbort(true);
+    expect(manager.isStallAutoAbort()).toBe(true);
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise(() => {});
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "s", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await new Promise((r) => setTimeout(r, 0));
+    record.lastActivityAt = Date.now() - 1000;
+    manager.sweepStall(id, record);
+    // Nudge fired, then the abort took the record out of running.
+    expect(stalled).toEqual([id]);
+    expect(stopped2).toEqual([id]);
+    expect(record.status).toBe("stopped");
+  });
+
+  it("armed: queued records are neither flagged nor aborted", async () => {
+    manager = new AgentManager();
+    manager.setStallThresholdMs(1);
+    manager.setStallAutoAbort(true);
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise(() => {});
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "s", isBackground: true });
+    const record = manager.getRecord(id)!;
+    // Forced back to queued with an ancient heartbeat (long queue wait).
+    record.status = "queued";
+    record.lastActivityAt = Date.now() - 1000;
+    manager.sweepStall(id, record);
+    expect(record.stalledSince).toBeUndefined();
+    expect(record.status).toBe("queued");
   });
 });

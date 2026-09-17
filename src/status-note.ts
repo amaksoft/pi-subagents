@@ -73,13 +73,15 @@ export function stallElapsedMs(
   return Math.max(0, now - record.lastActivityAt);
 }
 
-/** True when a running/queued agent has been silent past the threshold. */
+/** True when a running agent has been silent past the threshold.
+ * Queued agents are never stalled: their silence is waiting, not wedging —
+ * and the auto-abort below must never kill work that hasn't started. */
 export function isStalled(
   record: Pick<AgentRecord, "status" | "lastActivityAt">,
   now = Date.now(),
   thresholdMs = DEFAULT_STALL_THRESHOLD_MS,
 ): boolean {
-  if (record.status !== "running" && record.status !== "queued") return false;
+  if (record.status !== "running") return false;
   return stallElapsedMs(record, now) >= thresholdMs;
 }
 

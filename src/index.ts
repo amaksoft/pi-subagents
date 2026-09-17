@@ -652,6 +652,21 @@ export default function (pi: ExtensionAPI) {
     // at settle (status=stopped); that pre-existing mapping is unchanged.
     if (!isTopLevelAgent(record)) return;
     pi.events.emit("subagents:stopped", buildEventData(record));
+  }, (record) => {
+    // One stall nudge per silence episode — fired by the sweep the moment it
+    // flags the agent, re-armed by any later heartbeat. Nested/workflow
+    // children report through their owner, like every other lifecycle event.
+    if (!isTopLevelAgent(record)) return;
+    const diagnosis = describeStall(record) ?? "stalled";
+    pi.events.emit("subagents:stalled", buildEventData(record));
+    const footer = record.outputFile ? `\nPartial transcript so far: ${record.outputFile}` : "";
+    pi.sendMessage({
+      customType: "subagent-notification",
+      content: `@${record.alias ?? record.handle ?? record.id} (${record.type}) ${diagnosis} — no tool output, no streamed text, no usage since. ` +
+        `stop_subagent ${record.id} if it is time-sensitive; get_subagent_result still reads what it produced.${footer}`,
+      display: true,
+      details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
+    }, { deliverAs: "followUp", triggerTurn: true });
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -1424,6 +1439,8 @@ export default function (pi: ExtensionAPI) {
       setFleetView: setFleetViewEnabled,
       setAgentMentions: setAgentMentionMode,
       setRememberAgents,
+      setStallThresholdMs: (ms) => manager.setStallThresholdMs(ms),
+      setStallAutoAbort: (b) => manager.setStallAutoAbort(b),
       setWidgetMode: setWidgetMode,
       setOutputTranscript: setOutputTranscriptDefault,
       setWorktreeIsolation: setWorktreeIsolationEnabled,
@@ -3521,6 +3538,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
       fleetView: isFleetViewEnabled(),
       agentMentions: getAgentMentionMode(),
       rememberAgents: getRememberAgents(),
+      stallThresholdMs: manager.getStallThresholdMs(),
+      stallAutoAbort: manager.isStallAutoAbort(),
       widgetMode: getWidgetMode(),
       outputTranscript: getOutputTranscriptDefault(),
       worktreeIsolation: isWorktreeIsolationEnabled(),
@@ -3738,6 +3757,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
+          id: "stallAutoAbort",
+          label: "Stall auto-abort",
+          description: "Abort running agents silent past the stall threshold (10min default, stallThresholdMs in subagents.json). Off by default — a timer must never kill slow-but-alive work by surprise. Stops flow through the normal path with a STOPPED note.",
+          currentValue: manager.isStallAutoAbort() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
           id: "widgetMode",
           label: "Widget",
           description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
@@ -3909,6 +3935,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const enabled = value === "on";
         setRememberAgents(enabled);
         notifyApplied(ctx, `Remember agents ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "stallAutoAbort") {
+        const enabled = value === "on";
+        manager.setStallAutoAbort(enabled);
+        notifyApplied(ctx, `Stall auto-abort ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "widgetMode") {
         setWidgetMode(value as WidgetMode);
         notifyApplied(ctx, `Widget set to ${value}`);
