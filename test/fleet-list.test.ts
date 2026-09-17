@@ -673,6 +673,15 @@ describe("FleetList workflow rows", () => {
     expect(rows.findIndex(row => row.includes("audit-src"))).toBeLessThan(agent);
   });
 
+  it("shows a stalled count on the run row only when nonzero", () => {
+    const clean = harness([]);
+    clean.setWorkflows([makeWorkflow()]);
+    expect(clean.render().map(plain).join("\n")).not.toContain("stalled");
+    const flagged = harness([]);
+    flagged.setWorkflows([makeWorkflow({ stalledCount: 2 })]);
+    expect(flagged.render().map(plain).join("\n")).toContain("2 stalled");
+  });
+
   it("agrees with itself about a single-agent run", () => {
     const h = harness([]);
     h.setWorkflows([makeWorkflow({ doneCount: 1, totalCount: 1 })]);

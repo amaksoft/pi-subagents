@@ -49,6 +49,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import type { AgentRecord } from "../types.js";
 import type { WorkflowMeta } from "../workflow/meta.js";
 import {
   buildPhaseGroups,
@@ -65,10 +66,12 @@ import { SPINNER, type Theme } from "./agent-widget.js";
 import {
   ASCII_GLYPHS,
   clampLine,
+  countStalledAgents,
   formatCompactTokens,
   formatModel,
   formatThinking,
   REPLAYED_ANNOTATION,
+  stallAnnotation,
   styleWorkflowCardLines,
   UNICODE_GLYPHS,
   type WorkflowCardColor,
@@ -292,6 +295,11 @@ export interface WorkflowDialogSource {
 export interface WorkflowDialogInput extends WorkflowDialogSource {
   state: WorkflowDialogState;
   /**
+   * Live manager record lookup for stall annotations. Absent in tests and
+   * read-only callers — rows then render exactly as before.
+   */
+  getAgentRecord?: (recordId: string) => AgentRecord | undefined;
+  /**
    * Which actions the caller actually wired. Absent keys default to available,
    * so layout tests and read-only callers keep the full footer; a caller that
    * wires only some actions passes the map so the hints stay truthful.
@@ -404,6 +412,7 @@ export function subStatusAnnotations(
   entry: WorkflowAgentEntry,
   state: WorkflowDisplayState,
   now: number,
+  stall?: string,
 ): string[] {
   const parts: string[] = [];
   if (entry.isolation) parts.push(entry.isolation);
@@ -415,6 +424,8 @@ export function subStatusAnnotations(
   if (state === "queued" && entry.queuedAt != null) {
     parts.push(`waiting ${formatDuration(Math.max(0, now - entry.queuedAt))}`);
   }
+  // Last: a stall outranks history — it says what is wrong *now*.
+  if (stall) parts.push(stall);
   return parts;
 }
 
@@ -634,6 +645,7 @@ function agentRow(options: {
   workflowActive: boolean;
   spinnerFrame: number;
   now: number;
+  getAgentRecord?: (recordId: string) => AgentRecord | undefined;
 }): WorkflowCardLine {
   const { entry, selected, glyphs, width } = options;
   const display = displayState(entry, options.workflowActive);
@@ -651,7 +663,8 @@ function agentRow(options: {
 
   const model = formatModel(entry);
   if (model) head.push({ text: ` ${model}`, color: "dim" });
-  for (const part of [...subStatusAnnotations(entry, display, options.now), ...rowStatSegments(entry)]) {
+  const stall = stallAnnotation(entry, options.getAgentRecord);
+  for (const part of [...subStatusAnnotations(entry, display, options.now, stall), ...rowStatSegments(entry)]) {
     head.push({ text: " · ", color: "dim" }, { text: part, color: "dim" });
   }
   // The duration sits flush right, so a column of rows reads as a column of
@@ -688,7 +701,11 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   const lines: WorkflowCardLine[] = [];
 
   // ---- Header: the run's name, then its description with the stats flush right.
-  const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, now);
+  // Stalled children counted live per render (absent lookup = 0, today's look).
+  const stalledCount = input.getAgentRecord
+    ? countStalledAgents(input.progress, input.getAgentRecord, now)
+    : 0;
+  const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, now, stalledCount);
   lines.push(clampLine([{ text: " " }, { text: head.name, color: "toolTitle", bold: true }], width));
   lines.push(
     rightAlign(
@@ -758,6 +775,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
           workflowActive: view.workflowActive,
           spinnerFrame,
           now,
+          getAgentRecord: input.getAgentRecord,
         }),
       );
     }

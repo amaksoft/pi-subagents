@@ -357,6 +357,43 @@ describe("sub-status annotations", () => {
     expect(subStatusAnnotations(agentEntry({ index: 0, attempt: 1 }), "running", START)).toEqual([]);
   });
 
+  it("appends a live stall diagnosis last, behind history", () => {
+    expect(
+      subStatusAnnotations(agentEntry({ index: 0, attempt: 3 }), "running", START, "stalled 22m in bash"),
+    ).toEqual(["attempt 3", "stalled 22m in bash"]);
+    expect(subStatusAnnotations(agentEntry({ index: 0 }), "running", START, undefined)).toEqual([]);
+  });
+
+  it("agent rows join live stall heartbeats via getAgentRecord", () => {
+    const stalled = {
+      status: "running",
+      lastActivityAt: Date.now() - 22 * 60_000,
+      currentTool: { name: "bash", startedAt: Date.now() - 22 * 60_000 },
+    } as any;
+    const live = { status: "running", lastActivityAt: Date.now() } as any;
+    const getAgentRecord = (id: string) => (id === "rec-stalled" ? stalled : id === "rec-live" ? live : undefined);
+    const lines = plainWorkflowDialogLines(
+      layoutWorkflowDialog(
+        input({
+          progress: [
+            agentEntry({ index: 0, recordId: "rec-stalled" }),
+            agentEntry({ index: 1, recordId: "rec-live" }),
+            agentEntry({ index: 2, recordId: "rec-gone" }),
+          ],
+          getAgentRecord,
+        }),
+      ),
+    ).join("\n");
+    expect(lines).toContain("stalled 22m in bash");
+  });
+
+  it("rows render unchanged without a record lookup", () => {
+    const before = plainWorkflowDialogLines(
+      layoutWorkflowDialog(input({ progress: [agentEntry({ index: 0, recordId: "rec-x" })] })),
+    ).join("\n");
+    expect(before).not.toContain("stalled");
+  });
+
   it("marks a journal replay and an isolated child", () => {
     expect(
       subStatusAnnotations(agentEntry({ index: 0, cached: true, isolation: "worktree" }), "done", START),

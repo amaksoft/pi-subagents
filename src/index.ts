@@ -62,7 +62,7 @@ import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.
 import { createResumeTreePicker } from "./ui/resume-tree-picker.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
-import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
+import { countStalledAgents, renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
 import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
@@ -2358,6 +2358,8 @@ Terse command-style prompts produce shallow, generic work.
     // Cached counters only, no derivation: the fleet list calls this on a
     // 200ms tick and reads the roster several times per update, so walking a
     // run's progress log here would put O(log) work in the render loop.
+    // countStalledAgents is the deliberate exception: it joins worker entries
+    // against live manager records (O(live agents)), never the log.
     return [...workflowTasks.values()].map(task => ({
       id: task.id,
       name: task.meta?.name ?? task.workflowName ?? task.id,
@@ -2367,6 +2369,7 @@ Terse command-style prompts produce shallow, generic work.
       startedAt: task.startTime,
       ...(task.endTime !== undefined ? { completedAt: task.endTime } : {}),
       tokens: task.totalTokens,
+      stalledCount: countStalledAgents(task.workflowProgress, (id) => manager.getRecord(id)),
     }));
   }
 
@@ -2521,6 +2524,8 @@ Terse command-style prompts produce shallow, generic work.
           meta: task.meta,
           agentCount: task.agentCount,
           totalTokens: task.totalTokens,
+          // One-shot snapshot for a static result (the dialog stays live).
+          stalledCount: countStalledAgents(task.workflowProgress, (id) => manager.getRecord(id)),
         },
         theme,
       );

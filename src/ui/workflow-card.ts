@@ -32,6 +32,8 @@
  */
 
 import { stripTerminalSequences, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { describeStall, isStalled } from "../status-note.js";
+import type { AgentRecord } from "../types.js";
 import type { WorkflowEntryData } from "../workflow/entry.js";
 import type { WorkflowMeta } from "../workflow/meta.js";
 import {
@@ -161,6 +163,8 @@ export interface WorkflowCardInput {
   meta?: WorkflowMeta;
   /** Agents the runtime has scheduled, which can exceed those that have reported. */
   agentCount?: number;
+  /** Live stalled children, counted by the caller (see countStalledAgents). */
+  stalledCount?: number;
   /** Total tokens for the size warning; summed from the entries when omitted. */
   totalTokens?: number;
   agentCap?: number;
@@ -293,6 +297,40 @@ export function clampLine(line: WorkflowCardLine, width: number): WorkflowCardLi
 const lineWidth = (line: WorkflowCardLine) => line.reduce((sum, s) => sum + visibleWidth(s.text), 0);
 
 /**
+ * Count live stalled children for a run's header/fleet rows.
+ *
+ * Joins worker-reported entries (which carry the manager's recordId) against
+ * live manager records: entries without a record (replayed, settled-and-swept,
+ * pre-session deaths) contribute nothing. Callers pass fresh data per render
+ * rather than caching — the join is O(entries), and the fleet mapping that
+ * was the worry walks live records via getRecord, not the log.
+ * Pure — tested directly.
+ */
+export function countStalledAgents(
+  entries: readonly WorkflowEntry[],
+  getRecord: (recordId: string) => AgentRecord | undefined,
+  now = Date.now(),
+): number {
+  let count = 0;
+  for (const entry of entries) {
+    if (entry.type !== "workflow_agent" || !entry.recordId) continue;
+    const record = getRecord(entry.recordId);
+    if (record && isStalled(record, now)) count++;
+  }
+  return count;
+}
+
+/** One-line stall diagnosis for a dialog agent row, or undefined. */
+export function stallAnnotation(
+  entry: WorkflowAgentEntry,
+  getRecord: ((recordId: string) => AgentRecord | undefined) | undefined,
+): string | undefined {
+  if (!getRecord || !entry.recordId) return undefined;
+  const record = getRecord(entry.recordId);
+  return record ? describeStall(record) : undefined;
+}
+
+/**
  * Build the card.
  *
  * Everything derived — the phase tree, the header counts, the logs, the size
@@ -306,7 +344,7 @@ export function layoutWorkflowCard(input: WorkflowCardInput): WorkflowCardLine[]
   const groups = buildPhaseGroups(input.progress, input.meta?.phases);
   const { agents, logs } = collapse(input.progress);
   const totals = stats(input.progress, input.agentCount ?? 0);
-  const head = header(input.task, input.meta, groups, input.agentCount ?? 0, now);
+  const head = header(input.task, input.meta, groups, input.agentCount ?? 0, now, input.stalledCount ?? 0);
 
   const lines: WorkflowCardLine[] = [];
 

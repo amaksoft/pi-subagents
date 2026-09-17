@@ -366,6 +366,13 @@ describe("header", () => {
     expect(header(task, meta, groups, 1, 2000).stats).toBe("1/1 agent · 1s");
   });
 
+  it("appends a stalled count only when nonzero", () => {
+    const groups = buildPhaseGroups([agentEntry({ index: 0, state: "progress" })]);
+    expect(header(task, meta, groups, 1, 2000).stats).toBe("0/1 agent · 1s");
+    expect(header(task, meta, groups, 1, 2000, 0).stats).toBe("0/1 agent · 1s");
+    expect(header(task, meta, groups, 1, 2000, 2).stats).toBe("0/1 agent · 1s · 2 stalled");
+  });
+
   it.each([
     ["completed", " · done"],
     ["killed", " · stopped"],

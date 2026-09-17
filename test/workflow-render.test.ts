@@ -346,6 +346,36 @@ describe("header", () => {
     expect(header).not.toMatch(/1\/1|\d+ phases?/);
   });
 
+  it("shows a stalled count in the header only when nonzero", () => {
+    const [plain] = card({ progress: sevenAgents, now: START + 72_000 });
+    expect(plain).toContain("3/7 agents · 1m12s");
+    expect(plain).not.toContain("stalled");
+    const [flagged] = card({ progress: sevenAgents, now: START + 72_000, stalledCount: 2 });
+    expect(flagged).toContain("3/7 agents · 1m12s · 2 stalled");
+  });
+
+  it("counts live stalled children by record join", async () => {
+    const { countStalledAgents, stallAnnotation } = await import("../src/ui/workflow-card.js");
+    const stalled = {
+      status: "running",
+      lastActivityAt: Date.now() - 22 * 60_000,
+      currentTool: { name: "bash", startedAt: Date.now() - 22 * 60_000 },
+    } as any;
+    const live = { status: "running", lastActivityAt: Date.now() } as any;
+    const getRecord = (id: string) => (id === "r1" ? stalled : id === "r2" ? live : undefined);
+    const entries = [
+      agentEntry({ index: 0, recordId: "r1" }),
+      agentEntry({ index: 1, recordId: "r2" }),
+      agentEntry({ index: 2, recordId: "r-gone" }),
+      agentEntry({ index: 3 }),
+    ] as WorkflowEntry[];
+    expect(countStalledAgents(entries, getRecord)).toBe(1);
+    expect(stallAnnotation(entries[0] as WorkflowAgentEntry, getRecord)).toBe("stalled 22m in bash");
+    expect(stallAnnotation(entries[1] as WorkflowAgentEntry, getRecord)).toBeUndefined();
+    expect(stallAnnotation(entries[2] as WorkflowAgentEntry, getRecord)).toBeUndefined();
+    expect(stallAnnotation(entries[0] as WorkflowAgentEntry, undefined)).toBeUndefined();
+  });
+
   it("names the workflow, and the tool only when it stands alone", () => {
     // As a tool result there is a `▸ SubagentWorkflow …` call line directly
     // above, so repeating it here put two near-identical pointer lines back to

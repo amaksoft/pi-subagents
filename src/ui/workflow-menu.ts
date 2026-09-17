@@ -74,6 +74,7 @@ export async function showWorkflowDialog(
         tui,
         // Re-read on every render: the run is in the background, so the
         // dialog has to follow it rather than snapshot it at open time.
+        // getAgentRecord joins live stall heartbeats onto agent rows.
         () => ({
           progress: task.workflowProgress,
           task: {
@@ -85,6 +86,7 @@ export async function showWorkflowDialog(
           },
           meta: task.meta,
           agentCount: task.agentCount,
+          getAgentRecord: (recordId: string) => deps.getRecord(recordId),
         }),
         theme,
         done,
