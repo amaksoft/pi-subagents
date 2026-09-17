@@ -15,6 +15,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { escapeXml } from "../xml.js";
 import type { WorkflowJournalEntry } from "./journal.js";
 import type { WorkflowMeta } from "./meta.js";
@@ -310,6 +311,23 @@ export function workflowResultText(task: WorkflowTask): string {
  * could not see through. An unknown id is an error rather than a cold start,
  * because a caller that asked to resume is expecting not to pay.
  */
+/**
+ * Resume fallback for runs evicted from memory: same ok-shape as
+ * resolveResumeTarget, sourced from on-disk journal + script. Files are
+ * re-checked (a cleaned tmp dir must read as gone, not crash). Pure apart
+ * from the existence probe — tested directly.
+ */
+export function resolveEvictedResume(
+  runId: string | undefined,
+  liveIds: ReadonlySet<string>,
+  meta: { journalPath: string; scriptPath: string } | undefined,
+): { ok: true; runId: string; journalPath: string; scriptPath: string } | undefined {
+  const id = runId?.trim();
+  if (!id || liveIds.has(id) || meta === undefined) return undefined;
+  if (!existsSync(meta.journalPath) || !existsSync(meta.scriptPath)) return undefined;
+  return { ok: true, runId: id, journalPath: meta.journalPath, scriptPath: meta.scriptPath };
+}
+
 export function resolveResumeTarget(
   runId: string | undefined,
   tasks: ReadonlyMap<string, WorkflowTask>,

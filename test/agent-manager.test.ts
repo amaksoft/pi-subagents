@@ -3227,3 +3227,60 @@ describe("AgentManager live tool output flow", () => {
     await record.promise;
   });
 });
+
+describe("abort listener safety (total abort)", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("a throwing onStop does not break the abort or skip abortAll siblings", async () => {
+    let calls = 0;
+    manager = new AgentManager(undefined, 10, undefined, undefined, undefined, () => {
+      calls++;
+      throw new Error("listener boom");
+    });
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise(() => {});
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
+    });
+    const a = manager.spawn(mockPi, mockCtx, "Explore", "a", { description: "a", isBackground: true });
+    const b = manager.spawn(mockPi, mockCtx, "Explore", "b", { description: "b", isBackground: true });
+    await new Promise((r) => setTimeout(r, 0));
+    const stopped = manager.abortAll();
+    expect(stopped).toBe(2);
+    expect(manager.getRecord(a)!.status).toBe("stopped");
+    expect(manager.getRecord(b)!.status).toBe("stopped");
+    expect(calls).toBe(2);
+  });
+
+  it("queued-abort listener detaches on start (no leak, no late abort)", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    const holder = manager.spawn(mockPi, mockCtx, "Explore", "holder", { description: "h", isBackground: true });
+    const ctrl = new AbortController();
+    const waiter = manager.spawn(mockPi, mockCtx, "Explore", "waiter", {
+      description: "w",
+      isBackground: true,
+      signal: ctrl.signal,
+    });
+    const queued = manager.getRecord(waiter)!;
+    expect(queued.status).toBe("queued");
+    expect(queued.detachQueuedAbort).toBeDefined();
+    await manager.getRecord(holder)!.promise;
+    // Drained and started: the queued listener is gone…
+    await new Promise((r) => setTimeout(r, 0));
+    expect(manager.getRecord(waiter)!.detachQueuedAbort).toBeUndefined();
+    // …so a late parent abort cannot reach it through the stale path
+    // (startAgent's own wiring governs from here).
+    ctrl.abort();
+    await manager.getRecord(waiter)!.promise;
+    expect(["completed", "stopped"]).toContain(manager.getRecord(waiter)!.status);
+  });
+});

@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeCwd, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
 
 describe("encodeCwd", () => {
@@ -292,5 +292,33 @@ describe("streamToOutputFile", () => {
     expect(body).toContain("third answer");
     expect(body).not.toContain("first answer");
     expect(body).not.toContain("second answer");
+  });
+});
+
+describe("streamToOutputFile failure honesty", () => {
+  it("retries the same message after a failed append instead of baking a gap", () => {
+    const session = makeFakeSession([{ role: "user", content: "do the thing" }]);
+    // A directory, not a file: every append fails, deterministically.
+    const dirPath = mkdtempSync(join(tmpdir(), "stream-out-dir-"));
+    try {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const cleanup = streamToOutputFile(session as never, dirPath, "agent-9", "/work");
+        session.push({ role: "assistant", content: [{ type: "text", text: "one" }] });
+        session.fire({ type: "turn_end" });
+        // Warned once (break, not per-message spam)…
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("agent-9");
+        // …and nothing advanced past the failure (no gap baked in).
+        session.push({ role: "assistant", content: [{ type: "text", text: "two" }] });
+        session.fire({ type: "turn_end" });
+        expect(warn).toHaveBeenCalledTimes(2);
+        cleanup();
+      } finally {
+        warn.mockRestore();
+      }
+    } finally {
+      rmSync(dirPath, { recursive: true, force: true });
+    }
   });
 });

@@ -125,8 +125,15 @@ export function streamToOutputFile(
       };
       try {
         appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
-      } catch { /* ignore write errors */ }
-      writtenCount++;
+        writtenCount++;
+      } catch (err) {
+        // Do NOT advance past an unflushed message: that would bake a
+        // permanent gap into the transcript. Break (don't warn per message)
+        // so one full disk is one warning per flush; the next flush retries
+        // the same message (at-least-once).
+        console.warn(`[pi-subagents] transcript append failed for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
+        break;
+      }
     }
   };
 

@@ -253,6 +253,8 @@ export interface AgentRecord {
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */
   worktreeResult?: { hasChanges: boolean; branch?: string; path?: string; error?: string };
+  /** Detach for the queued-abort parent-signal listener (see armQueuedAbort). */
+  detachQueuedAbort?: () => void;
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;
   /** Path to the streaming output transcript file. */

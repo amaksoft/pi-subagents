@@ -628,12 +628,30 @@ export class AgentManager {
         record.status = "stopped";
         record.completedAt = Date.now();
         record.pendingSteers = undefined;
-        this.onStop?.(record);
+        try {
+          this.onStop?.(record);
+        } catch { /* a listener must never break the stop itself */ }
       }
       return false;
     }
-    signal.addEventListener("abort", () => this.abort(id), { once: true });
+    // Stored on the record (not just closed over): without a handle the
+    // listener outlives the queue entry — leaking one closure per queued
+    // spawn and risking a late abort landing on a settled record's id.
+    // Cleared on start (launch), abort, and removal; each clears defensively
+    // since the three can race (stop-then-start, start-then-stop).
+    const onAbort = () => this.abort(id);
+    signal.addEventListener("abort", onAbort, { once: true });
+    const record = this.agents.get(id);
+    if (record !== undefined) {
+      record.detachQueuedAbort = () => signal.removeEventListener("abort", onAbort);
+    }
     return true;
+  }
+
+  /** Drop a queued-abort listener that has served (started, aborted, gone). */
+  private detachQueuedAbort(record: AgentRecord): void {
+    record.detachQueuedAbort?.();
+    record.detachQueuedAbort = undefined;
   }
 
   /**
@@ -650,6 +668,9 @@ export class AgentManager {
    *   handle goes back.
    */
   private launch(id: string, record: AgentRecord, args: SpawnArgs, queuedPool: Pool | undefined): Promise<void> {
+    // Leaving the queue: startAgent wires its own parent-signal listener, so
+    // the queued one retires here rather than doubling (or leaking) it.
+    this.detachQueuedAbort(record);
     const startup = this.startAgent(id, record, args).then(
       () => { this.startups.delete(id); },
       (err) => {
@@ -1554,6 +1575,9 @@ export class AgentManager {
   abort(id: string): boolean {
     const record = this.agents.get(id);
     if (!record) return false;
+    // The queued-abort listener served its purpose (or never will): drop it
+    // here rather than letting it fire late onto a settled record's id.
+    this.detachQueuedAbort(record);
 
     // Remove from queue if queued. No decrement — the slot was never taken —
     // and no onComplete, matching what a queued background abort has always
@@ -1566,7 +1590,9 @@ export class AgentManager {
       // but drop the queue anyway so a late session creation cannot flush
       // guidance into an agent that was stopped before it started.
       record.pendingSteers = undefined;
-      this.onStop?.(record);
+      try {
+        this.onStop?.(record);
+      } catch { /* a listener must never break the stop itself */ }
       return true;
     }
 
@@ -1578,12 +1604,18 @@ export class AgentManager {
     // meaningless, and without this a session created after the stop would
     // still flush queued steers into it via onSessionCreated.
     record.pendingSteers = undefined;
-    this.onStop?.(record);
+    // Guarded like onComplete/onStall: abort() routes abortAll() and the
+    // stall sweep, so a throwing listener here would skip remaining aborts
+    // or break the sweep mid-iteration — the stop must be total.
+    try {
+      this.onStop?.(record);
+    } catch { /* a listener must never break the stop itself */ }
     return true;
   }
 
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
+    this.detachQueuedAbort(record);
     this.tombstone(record);
     // Last chance to finalize the output transcript: eviction skips every
     // settle path, and without this the file handle pins until process end.
@@ -1724,7 +1756,9 @@ export class AgentManager {
       && isTopLevelAgent(record)
       && isStalled(record, now, this.stallThresholdMs)
     ) {
-      this.abort(id);
+      try {
+        this.abort(id);
+      } catch { /* sweep must never die on one record */ }
     }
   }
 

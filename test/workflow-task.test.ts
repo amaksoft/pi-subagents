@@ -242,3 +242,30 @@ describe("settled run eviction", () => {
     expect(selectSettledEvictions([], 5)).toEqual([]);
   });
 });
+
+describe("evicted-run resume fallback", () => {
+  it("resolves off disk when memory forgot the run", async () => {
+    const { resolveEvictedResume } = await import("../src/workflow/task.js");
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "pi-resume-test-"));
+    const journal = join(dir, "wf_x.workflow.jsonl");
+    const script = join(dir, "wf_x.workflow.js");
+    writeFileSync(journal, "{}\n");
+    writeFileSync(script, "export const meta = {};");
+    const meta = { journalPath: journal, scriptPath: script };
+    expect(resolveEvictedResume("wf_x", new Set(), meta)).toEqual({
+      ok: true, runId: "wf_x", journalPath: journal, scriptPath: script,
+    });
+    // Live tasks win: memory owns the id.
+    expect(resolveEvictedResume("wf_x", new Set(["wf_x"]), meta)).toBeUndefined();
+    // Unknown (caller found no metadata), blank, or missing files: no fallback.
+    expect(resolveEvictedResume("wf_y", new Set(), undefined)).toBeUndefined();
+    expect(resolveEvictedResume("  ", new Set(), meta)).toBeUndefined();
+    expect(resolveEvictedResume("wf_x", new Set(), undefined)).toBeUndefined();
+    expect(
+      resolveEvictedResume("wf_x", new Set(), { journalPath: join(dir, "gone.jsonl"), scriptPath: script }),
+    ).toBeUndefined();
+  });
+});

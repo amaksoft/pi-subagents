@@ -73,7 +73,7 @@ import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/met
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
-import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, MAX_TIMEOUT_MS, resolveResumeTarget, selectSettledEvictions, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, MAX_TIMEOUT_MS, resolveEvictedResume, resolveResumeTarget, selectSettledEvictions, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -2481,12 +2481,40 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   /**
+   * Small resume metadata for evicted runs: eviction drops live task objects
+   * (with their full progress logs) but resume-from-checkpoint must keep
+   * working off the journal + saved script on disk. Bounded like the tasks.
+   */
+  const resumableRuns = new Map<string, { journalPath: string; scriptPath: string }>();
+  const MAX_RESUMABLE_RUNS = 500;
+  function rememberResumableRun(runId: string, journalPath: string | undefined, scriptPath: string | undefined): void {
+    if (journalPath === undefined || scriptPath === undefined) return;
+    if (resumableRuns.size >= MAX_RESUMABLE_RUNS) {
+      const oldest = resumableRuns.keys().next();
+      if (!oldest.done) resumableRuns.delete(oldest.value);
+    }
+    resumableRuns.set(runId, { journalPath, scriptPath });
+  }
+  /**
+   * Resume fallback for runs evicted from memory: same ok-shape as
+   * resolveResumeTarget, sourced from on-disk journal + script. Files are
+   * re-checked (a cleaned tmp dir must read as gone, not crash).
+   */
+  function resolveEvictedResumeTarget(runId: string | undefined):
+    | undefined
+    | { ok: true; runId: string; journalPath: string; scriptPath: string }
+    | { ok: false; message: string } {
+    const liveIds = new Set(workflowTasks.keys());
+    return resolveEvictedResume(runId, liveIds, resumableRuns.get(runId?.trim() ?? ""));
+  }
+  /**
    * Bound in-session retention for settled runs and their append-only logs.
    * A long session that fans out repeatedly would otherwise accumulate every
    * run's full progress log in memory forever. Running/paused runs are never
-   * touched; journal files stay on disk (resume still works), only the live
-   * task objects go. Surfaces that hold an id (dialog, transcript render)
-   * already treat a missing task as settled-and-swept rather than crashing.
+   * touched. Eviction drops live objects only — resume keeps working through
+   * resolveEvictedResumeTarget off on-disk journals. Surfaces that hold an
+   * id (dialog, transcript render) already treat a missing task as
+   * settled-and-swept rather than crashing.
    */
   function evictSettledWorkflows(): void {
     for (const id of selectSettledEvictions([...workflowTasks.values()], MAX_SETTLED_WORKFLOWS)) {
@@ -2590,7 +2618,13 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (toolCallId, params, _signal, _onUpdate, ctx) => {
-      const resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks);
+      // Evicted runs leave memory but keep journals: fall back to disk
+      // before reporting unknown. (?? alone would not suffice — a miss
+      // returns ok:false, not undefined.)
+      let resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks);
+      if (resumeFrom !== undefined && !resumeFrom.ok) {
+        resumeFrom = resolveEvictedResumeTarget(params.resumeFromRunId) ?? resumeFrom;
+      }
       if (resumeFrom !== undefined && !resumeFrom.ok) return textResult(resumeFrom.message);
 
       // A resume with no source of its own re-runs what that run ran. The
@@ -2663,6 +2697,7 @@ Terse command-style prompts produce shallow, generic work.
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       });
       workflowTasks.set(runId, task);
+      rememberResumableRun(runId, journalPath, savedPath);
       // Budget starts now: expiry aborts through the normal kill path, and
       // the settle below rewrites the generic abort error with the cause.
       // Guarded: an expiry landing in the same tick as natural completion

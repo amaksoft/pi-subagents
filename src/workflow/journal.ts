@@ -141,12 +141,19 @@ export function readJournal(path: string): WorkflowJournalEntry[] {
   return entries;
 }
 
-/** Append one settled call. Failure to write is not failure to run. */
-export function appendJournal(path: string, entry: WorkflowJournalEntry): void {
+/**
+ * Append one settled call. Returns false (and warns with the path) when the
+ * write fails, so a full disk reads as "journal unavailable" rather than
+ * being indistinguishable from "nothing worth resuming". Failure to write
+ * is not failure to run — the run's own result is unaffected.
+ */
+export function appendJournal(path: string, entry: WorkflowJournalEntry): boolean {
   try {
     appendFileSync(path, `${JSON.stringify(entry)}\n`, "utf-8");
-  } catch {
-    // A journal that cannot be written costs a future resume, nothing more.
+    return true;
+  } catch (err) {
+    console.warn(`[pi-subagents] journal append failed for ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
   }
 }
 
