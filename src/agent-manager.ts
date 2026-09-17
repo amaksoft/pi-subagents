@@ -557,6 +557,7 @@ export class AgentManager {
       toolUses: 0,
       startedAt: Date.now(),
       lastActivityAt: Date.now(),
+      epoch: 0,
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
       compactionCount: 0,
@@ -714,9 +715,18 @@ export class AgentManager {
     // startAgent wires its own parent-signal listener, so
     // the queued one retires here rather than doubling (or leaking) it.
     this.detachQueuedAbort(record);
+    // Generation at launch: a resume started after this launch but before its
+    // failure lands means a newer run owns the record — the stale failure
+    // must not park/delete under it. (No slot juggling here either: whatever
+    // slot exists belongs to the current generation by construction.)
+    const launchEpoch = record.epoch;
     const startup = this.startAgent(id, record, args).then(
       () => { this.startups.delete(id); },
       (err) => {
+        if (record.epoch !== launchEpoch) {
+          this.startups.delete(id);
+          return;
+        }
         const failure = this.failStartup(id, record, err, queuedPool);
         // The agent never kept its slot (startAgent gives it back on failure),
         // so anything queued behind it can go now.
@@ -968,6 +978,9 @@ export class AgentManager {
       },
     })
       .then(async ({ responseText, session, aborted, steered, failure, structuredJson, structuredRetried }) => {
+        // Stale generation: a resume started a newer run on this record while
+        // this one was unwinding — hands off everything it owns.
+        if (record.epoch !== epoch) return responseText;
         // Precedence lives in domain/agent.reduceSettle (aborted > error >
         // steered > completed, stopped sticky); the manager only applies it.
         const decision = reduceSettle({
@@ -1033,6 +1046,8 @@ export class AgentManager {
         return responseText;
       })
       .catch(async (err) => {
+        // Stale generation (see the .then above): hands off, new run owns it.
+        if (record.epoch !== epoch) return "";
         // Spawn path keeps the rejection error even on stopped records
         // (resume paths do not) — carried explicitly, see reduceSettle.
         const decision = reduceSettle({
@@ -1069,8 +1084,12 @@ export class AgentManager {
 
     // Kickoff: the run exists from here on, so provisioning ends. Set BEFORE
     // assigning the promise — waiters that observe a promise must never see a
-    // record that still claims to be starting.
+    // record that still claims to be starting. The epoch is captured with it:
+    // every settle handler below ignores completions from older generations
+    // (abort→resume→old-settles must not touch the new run's status, result,
+    // lease, or children).
     if (record.status === "provisioning") record.status = "running";
+    const epoch = record.epoch;
     record.promise = promise;
 
     // Notify caller that spawn is complete (record is in the map, promise is set).
@@ -1321,6 +1340,18 @@ export class AgentManager {
     }
 
     // Foreground resume: run inline and return the settled record.
+    // New generation (see startResume): late settlement from the previous
+    // run on this record must not touch the new run.
+    record.epoch++;
+    const epoch = record.epoch;
+    // Orphaned lease from an unsettled predecessor (aborted mid-flight):
+    // its settle is epoch-barred from releasing, so free it here. A normally
+    // settled predecessor already cleared it; foreground resumes never hold
+    // a lease of their own, so release exactly covers the orphan.
+    if (record.slotLease !== undefined) {
+      this.poolLedger = releaseLedgerSlot(this.poolLedger, record.slotLease);
+      record.slotLease = undefined;
+    }
     record.status = "running";
     record.startedAt = Date.now();
     record.completedAt = undefined;
@@ -1384,6 +1415,8 @@ export class AgentManager {
           },
           signal: abortController.signal,
         });
+        // Stale generation: a newer resume owns the record — hands off.
+        if (record.epoch !== epoch) return "";
         // Don't overwrite an external stop — mirrors every other settle path.
         // Without this a stop landing mid-run would be relabeled "completed".
         if (!isExternallyStopped()) {
@@ -1404,6 +1437,8 @@ export class AgentManager {
         record.result = text;
         record.completedAt = Date.now();
       } catch (err) {
+        // Stale generation (see above): hands off, new run owns it.
+        if (record.epoch !== epoch) return "";
         const resumeDecision = reduceSettle({
           kind: "rejected",
           stopped: isExternallyStopped(),
@@ -1418,11 +1453,14 @@ export class AgentManager {
       }
       return "";
     })();
+    // Generation at await time: a newer resume meanwhile replaced the promise
+    // and owns the record — its tail (not this one) aborts children.
+    const awaitedEpoch = record.epoch;
     await record.promise;
 
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
-    this.abortOwnedChildren(id);
+    if (record.epoch === awaitedEpoch) this.abortOwnedChildren(id);
 
     return record;
   }
@@ -1443,6 +1481,17 @@ export class AgentManager {
   ) {
     if (!record.session) return;
 
+    // New generation: any late settlement from the previous run on this
+    // record must not touch the new run's status, result, lease, or children.
+    record.epoch++;
+    const epoch = record.epoch;
+    // Orphaned lease, same as the foreground path: freed here because the
+    // old settle is epoch-barred from touching it. The acquire below then
+    // counts exactly the new run's slot.
+    if (record.slotLease !== undefined) {
+      this.poolLedger = releaseLedgerSlot(this.poolLedger, record.slotLease);
+      record.slotLease = undefined;
+    }
     record.status = "running";
     record.startedAt = Date.now();
     // Resumes re-enter the pool like fresh starts (same lease discipline).
@@ -1479,6 +1528,9 @@ export class AgentManager {
     try { options.onStarted?.(); } catch { /* ignore caller wiring errors */ }
 
     const settle = () => {
+      // Stale generation: a newer resume owns the record — its lease,
+      // children, and completion belong to it, not to this run.
+      if (record.epoch !== epoch) return;
       detachParentSignal?.();
       detachParentSignal = undefined;
       // Final flush of streaming output file

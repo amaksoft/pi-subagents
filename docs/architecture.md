@@ -55,6 +55,10 @@ predicate — see status-note.ts), schedule mapping, notifications.
 - [x] Phase 1 (settle seam): `src/domain/agent.ts` `reduceSettle` + delegation.
 - [x] Phase 2 (startup): `provisioning` status end-to-end; `StartupError` +
   `failStartup` unifying queued-park vs immediate-throw.
+- [x] Epoch guards: `record.epoch` bumped per new run; all six settle
+  sites ignore stale generations (abort→resume→old-settles can no longer
+  corrupt status/result/lease/children). Fixed a real leaked slot on
+  foreground resume found by the new tests.
 - [ ] Phase 2 remainder: `StartupError` exported for programmatic callers
   (currently internal to the manager path).
 - [ ] Phases 3–5: settle unification via runner outcomes, workflow

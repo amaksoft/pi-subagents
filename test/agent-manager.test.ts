@@ -3449,3 +3449,99 @@ describe("startup failure unification (StartupError)", () => {
     expect(record.error).toMatch(/copy failed/);
   });
 });
+
+describe("epoch guards (abort → resume → old settles)", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("a stale generation touches nothing: status, result, lease, children", async () => {
+    const completed: string[] = [];
+    manager = new AgentManager(r => {
+      completed.push(`${r.id}:${r.status}`);
+    });
+    let resolveRun1!: (v: any) => void;
+    let resolveRun2!: (v: any) => void;
+    let calls = 0;
+    vi.mocked(runAgent).mockImplementation(() => {
+      calls++;
+      const n = calls;
+      return new Promise(resolve => {
+        if (n === 1) resolveRun1 = resolve;
+        else resolveRun2 = resolve;
+      });
+    });
+    vi.mocked(resumeAgent).mockImplementation(() => {
+      calls++;
+      return new Promise(resolve => {
+        resolveRun2 = resolve;
+      });
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await new Promise(r => setTimeout(r, 0));
+    expect(record.status).toBe("running");
+
+    // Abort, then resume before the old run unwinds: a new generation starts.
+    // resume() blocks inline, so drive it without awaiting yet.
+    expect(manager.abort(id)).toBe(true);
+    record.session = mockSession();
+    const resumedP = manager.resume(id, "continue");
+    for (let i = 0; i < 200 && resolveRun2 === undefined; i++) {
+      await new Promise(r => setTimeout(r, 0));
+    }
+    expect(resolveRun2).toBeDefined();
+    expect(record.epoch).toBe(1);
+
+    // Resume freed the orphaned lease (foreground resumes hold none): the
+    // slot is back in the pool, not dangling on a dead run.
+    expect(record.slotLease).toBeUndefined();
+    // The OLD run settles now: text, status, lease, children, notification
+    // must all belong to the new run afterwards.
+    resolveRun1({ responseText: "OLD TEXT", session: mockSession(), aborted: false, steered: false });
+    await new Promise(r => setTimeout(r, 10));
+    expect(record.status).toBe("running");
+    expect(record.result ?? "").not.toContain("OLD TEXT");
+    expect(record.slotLease).toBeUndefined();
+    expect(completed).toEqual([]);
+
+    // The new run settles normally (foreground resumes report inline, so
+    // no onComplete fires — status/result/lease are the assertions).
+    resolveRun2({ text: "NEW TEXT" });
+    const resumed = await resumedP;
+    expect(resumed).toBeDefined();
+    expect(record.status).toBe("completed");
+    expect(record.result).toBe("NEW TEXT");
+    expect(record.slotLease).toBeUndefined();
+    expect(completed).toEqual([]);
+  });
+
+  it("launch failure from a stale generation neither parks nor deletes", async () => {
+    manager = new AgentManager();
+    const { createWorktree } = await import("../src/worktree.js");
+    let rejectCopy!: (err: Error) => void;
+    vi.mocked(createWorktree).mockImplementationOnce(
+      () => new Promise((_, reject) => { rejectCopy = reject; }),
+    );
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "x",
+      isBackground: true,
+      isolation: "worktree",
+    });
+    const record = manager.getRecord(id)!;
+    // Abort (owns it), then simulate a newer generation taking over…
+    expect(manager.abort(id)).toBe(true);
+    record.epoch++;
+    record.status = "running";
+    // …then the old copy fails: must not park error or delete the record.
+    rejectCopy(new Error("git gone"));
+    await new Promise(r => setTimeout(r, 10));
+    expect(manager.getRecord(id)).toBe(record);
+    expect(record.status).toBe("running");
+    expect(record.error).toBeUndefined();
+  });
+});

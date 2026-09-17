@@ -262,6 +262,14 @@ export interface AgentRecord {
   /** Detach for the queued-abort parent-signal listener (see armQueuedAbort). */
   detachQueuedAbort?: () => void;
   /**
+   * Run generation. Spawn creates at 0; every resume increments. Settle
+   * handlers capture the epoch at kickoff and ignore completions from older
+   * generations: without this, an abort→resume→old-settles sequence lets
+   * the dead run overwrite the new run's status, result, slot lease, and
+   * children.
+   */
+  epoch: number;
+  /**
    * Pool slot this run holds, set at acquire time. Release consumes it —
    * the pool is never recomputed at release, so a mid-run settings change
    * cannot make the release disagree with the acquire (see domain/queue).
