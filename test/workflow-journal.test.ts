@@ -309,3 +309,40 @@ describe("replay", () => {
     expect(second.calls).toHaveLength(0);
   });
 });
+
+describe("journal golden fixtures (architecture Phase 0 freeze)", () => {
+  // Byte-identical pins: the replay prefix rule keys on these digests, so any
+  // change here invalidates every journal on disk. If this test fails, it is
+  // a migration event, not a refactor — version the reader, don't update the
+  // expectation.
+  it("pins journalKey digests byte-identically", async () => {
+    const { journalKey } = await import("../src/workflow/journal.js");
+    expect(journalKey({ prompt: "a" })).toBe("26e6e3e6257fcbc88d417ab0c9ef43a0");
+    expect(journalKey({ prompt: "audit", model: "haiku", label: "one" })).toBe(
+      "2ac12d8cf614c5590b7ba5aad80bdb77",
+    );
+  });
+
+  it("readJournal is byte-faithful passthrough (prefix rule lives in runtime)", async () => {
+    const { readJournal } = await import("../src/workflow/journal.js");
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "pi-journal-golden-"));
+    const path = join(dir, "run.workflow.jsonl");
+    // Out of order + corrupt tail + failed entry: reader returns every valid
+    // entry sorted, skipping garbage. Deciding the reusable PREFIX (first
+    // failure poisons the rest) is the runtime's replayAt job, not the
+    // reader's — this pin keeps the layers from drifting together.
+    const lines = [
+      { index: 1, key: "k1", ok: true, text: "second" },
+      { index: 0, key: "k0", ok: true, text: "first" },
+      { index: 2, key: "k2", ok: false, text: "broke" },
+      "{half-written",
+    ];
+    writeFileSync(path, lines.map(l => (typeof l === "string" ? l : JSON.stringify(l))).join("\n") + "\n");
+    const entries = readJournal(path);
+    expect(entries.map(e => e.index)).toEqual([0, 1, 2]);
+    expect(entries[2].ok).toBe(false);
+  });
+});
