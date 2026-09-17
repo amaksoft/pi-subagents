@@ -59,6 +59,7 @@ import {
   type UICtx,
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
+import { createResumeTreePicker } from "./ui/resume-tree-picker.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
@@ -4050,6 +4051,18 @@ Write the file using the write tool. Only write the file, nothing else.`;
             (await SessionManager.list(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionDir())).map(toResumeSession),
           listAll: async () => (await SessionManager.listAll()).map(toResumeSession),
           currentSessionFile: () => ctx.sessionManager.getSessionFile?.(),
+          // Collapsible tree overlay in tui mode only: custom components
+          // need a terminal (see ExtensionMode docs). Other modes keep the
+          // filtered flat list.
+          pickFromTree: ctx.mode === "tui"
+            ? (roots) =>
+              ctx.ui.custom<string | undefined>((_tui, theme, _kb, done) =>
+                createResumeTreePicker(
+                  { roots, currentFile: ctx.sessionManager.getSessionFile?.() },
+                  theme,
+                  done,
+                ))
+            : undefined,
           select: (title, options) => ctx.ui.select(title, options),
           notify: (message, type) => ctx.ui.notify(message, type ?? "info"),
           switchSession: (path) => ctx.switchSession(path),

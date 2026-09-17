@@ -125,3 +125,40 @@ describe("runResumeFiltered", () => {
     expect(failing.notices.join(" ")).toContain("Could not list sessions");
   });
 });
+
+describe("runResumeFiltered tree mode", () => {
+  it("passes the full tree (subagents included) and switches to the pick", async () => {
+    const { buildSessionTree } = await import("../src/session-tree.js");
+    const parent = session({ path: "/sessions/parent.jsonl", name: "real work" });
+    const child = session({
+      path: "/sessions/child.jsonl",
+      parentSessionPath: "/sessions/parent.jsonl",
+    });
+    let seenRoots: unknown[] = [];
+    const d = deps({
+      listCurrent: async () => [parent, child],
+      pickFromTree: async (roots) => {
+        seenRoots = roots;
+        return "/sessions/child.jsonl";
+      },
+    });
+    await runResumeFiltered(d, "");
+    // Tree keeps the child (collapsed by default in the UI) instead of hiding.
+    expect((seenRoots as { session: { path: string } }[])[0].session.path).toBe(
+      "/sessions/parent.jsonl",
+    );
+    expect(d.switched).toEqual(["/sessions/child.jsonl"]);
+    expect(buildSessionTree).toBeDefined();
+  });
+
+  it("does nothing when the tree picker is cancelled", async () => {
+    const d = deps({
+      listCurrent: async () => [session()],
+      pickFromTree: async () => undefined,
+      select: vi.fn(),
+    });
+    await runResumeFiltered(d, "");
+    expect(d.switched).toEqual([]);
+    expect(d.select).not.toHaveBeenCalled();
+  });
+});

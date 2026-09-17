@@ -14,6 +14,7 @@
  */
 
 import type { SessionInfo } from "@earendil-works/pi-coding-agent";
+import { buildSessionTree, type SessionTreeNode } from "./session-tree.js";
 import { selectItem } from "./ui/select-item.js";
 
 /** Minimal session shape this needs (structural subset of SessionInfo). */
@@ -32,6 +33,12 @@ export interface ResumeFilteredDeps {
   listAll(): Promise<ResumeSession[]>;
   /** Absolute path of the session the command runs in, if known. */
   currentSessionFile?: () => string | undefined;
+  /**
+   * Collapsible tree picker (tui only). When supplied, subagent sessions are
+   * kept as collapsed children instead of filtered out; without it (non-tui
+   * modes) the command falls back to the filtered flat list.
+   */
+  pickFromTree?: (roots: SessionTreeNode[]) => Promise<string | undefined>;
   select(title: string, options: string[]): Promise<string | undefined>;
   notify(message: string, type?: "info" | "warning" | "error"): void;
   switchSession(path: string): Promise<{ cancelled: boolean }>;
@@ -72,18 +79,34 @@ export async function runResumeFiltered(deps: ResumeFilteredDeps, args: string):
     deps.notify(`Could not list sessions: ${err instanceof Error ? err.message : String(err)}`, "error");
     return;
   }
+  if (sessions.length === 0) {
+    deps.notify("No sessions found.", "info");
+    return;
+  }
+  const currentFile = deps.currentSessionFile?.();
+  if (deps.pickFromTree) {
+    // Tree mode: relations preserved, children collapsed by default. Nothing
+    // is hidden — subagent runs sit under their spawner with a count badge.
+    const picked = await deps.pickFromTree(buildSessionTree(sessions));
+    if (!picked) return; // escaped
+    try {
+      await deps.switchSession(picked);
+    } catch (err) {
+      deps.notify(`Could not resume session: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+    return;
+  }
+  // Non-tui fallback: the flat select dialog (no windowing there either, but
+  // print/rpc output is consumed as text, not navigated).
   const hiddenCount = sessions.filter(isSubagentSession).length;
   const visible = sessions.filter(s => !isSubagentSession(s));
   if (visible.length === 0) {
     deps.notify(
-      hiddenCount > 0
-        ? `No interactive sessions found — hid ${hiddenCount} subagent session${hiddenCount === 1 ? "" : "s"}. Core /resume still lists everything.`
-        : "No sessions found.",
+      `No interactive sessions found — hid ${hiddenCount} subagent session${hiddenCount === 1 ? "" : "s"}. Core /resume still lists everything.`,
       "info",
     );
     return;
   }
-  const currentFile = deps.currentSessionFile?.();
   const picked = await selectItem(
     deps,
     scopeAll ? "Resume session (all folders, no subagents)" : "Resume session (no subagents)",
