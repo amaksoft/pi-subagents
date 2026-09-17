@@ -83,6 +83,14 @@ export interface WorkflowTask {
   /** Excluded from the elapsed clock the header shows. */
   totalPausedMs: number;
 
+  /** Wall-clock budget in ms of *active* run time (pauses excluded). Unset/<=0 = unlimited. */
+  timeoutMs?: number;
+  /** Set when the budget expired (even if the abort landed a beat later). */
+  timeoutFired?: boolean;
+  /** Live budget timer; cleared on pause/settle, re-armed on resume. */
+  timeoutTimer?: ReturnType<typeof setTimeout>;
+  /** Expire action, stored so pause/resume re-arm without new closures. */
+  onTimeout?: () => void;
   /** The script's return value, once the run produced one. */
   value?: unknown;
   error?: string;
@@ -99,6 +107,7 @@ export function createWorkflowTask(init: {
   journalPath?: string;
   replay?: readonly WorkflowJournalEntry[];
   resumedFrom?: string;
+  timeoutMs?: number;
 }): WorkflowTask {
   return {
     type: "local_workflow",
@@ -113,6 +122,7 @@ export function createWorkflowTask(init: {
     journalPath: init.journalPath,
     replay: init.replay,
     resumedFrom: init.resumedFrom,
+    timeoutMs: init.timeoutMs,
     replayedCount: 0,
     workflowProgress: [],
     progressVersion: 0,
@@ -163,32 +173,75 @@ export function updateWorkflowProgressBatch(
   task.doneCount = done;
 }
 
+/** Active (unpaused) run time in ms — what the wall-clock budget consumes. */
+export function activeElapsedMs(task: WorkflowTask, now = Date.now()): number {
+  return Math.max(
+    0,
+    now - task.startTime - (task.totalPausedMs ?? 0) - (task.pausedAt !== undefined ? Math.max(0, now - task.pausedAt) : 0),
+  );
+}
+
+/** Clear a live budget timer, if any. Idempotent. */
+export function disarmWorkflowTimeout(task: WorkflowTask): void {
+  if (task.timeoutTimer !== undefined) {
+    clearTimeout(task.timeoutTimer);
+    task.timeoutTimer = undefined;
+  }
+}
+
+/**
+ * Arm the wall-clock budget from the remaining active time. Unset/non-positive
+ * budgets mean unlimited and arm nothing. A run already past budget fires on
+ * the next tick rather than throwing inside the caller. The stored onTimeout
+ * lets pause/resume re-arm without new closures.
+ */
+export function armWorkflowTimeout(task: WorkflowTask, onExpire?: () => void, now = Date.now()): void {
+  disarmWorkflowTimeout(task);
+  if (onExpire !== undefined) task.onTimeout = onExpire;
+  const budget = task.timeoutMs ?? 0;
+  if (budget <= 0 || task.onTimeout === undefined) return;
+  const remaining = budget - activeElapsedMs(task, now);
+  const timer = setTimeout(() => {
+    task.timeoutTimer = undefined;
+    task.timeoutFired = true;
+    task.onTimeout?.();
+  }, Math.max(0, remaining));
+  // A budget must never hold the process open by itself.
+  timer.unref?.();
+  task.timeoutTimer = timer;
+}
+
 /**
  * Hold the run, and stop its clock.
  *
  * The elapsed figure every surface shows subtracts `totalPausedMs`, so a run
  * left paused overnight does not come back reading as a twelve-hour run.
+ * The budget timer stops with it — inspection time is not run time.
  */
 export function pauseWorkflowTask(task: WorkflowTask, now = Date.now()): boolean {
   if (task.status !== "running" || task.control === undefined) return false;
   task.control.pause();
   task.status = "paused";
   task.pausedAt = now;
+  disarmWorkflowTimeout(task);
   return true;
 }
 
-/** Let it go again, banking however long it was held. */
+/** Let it go again, banking however long it was held. Budget re-arms on the remainder. */
 export function resumeWorkflowTask(task: WorkflowTask, now = Date.now()): boolean {
   if (task.status !== "paused" || task.control === undefined) return false;
   task.control.resume();
   task.status = "running";
   task.totalPausedMs = (task.totalPausedMs ?? 0) + Math.max(0, now - (task.pausedAt ?? now));
   task.pausedAt = undefined;
+  armWorkflowTimeout(task);
   return true;
 }
 
 /** Settle a task from the run's own result. */
 export function completeWorkflowTask(task: WorkflowTask, result: WorkflowRunResult): void {
+  // A spent budget must not outlive the run it was timing.
+  disarmWorkflowTimeout(task);
   // Banked before the status moves off "paused": a run that finished while held
   // still spent that time held, and the elapsed figure has to say so.
   if (task.pausedAt !== undefined) {
@@ -213,6 +266,7 @@ export function completeWorkflowTask(task: WorkflowTask, result: WorkflowRunResu
  * worker started (bad `meta`, oversized source, non-JSON `args`).
  */
 export function failWorkflowTask(task: WorkflowTask, error: string): void {
+  disarmWorkflowTimeout(task);
   task.control = undefined;
   task.pausedAt = undefined;
   task.status = "failed";

@@ -224,6 +224,7 @@ export const meta = {
 | `name` | string | A saved workflow — `<name>.js` in one of the three directories above. Lowest precedence |
 | `args` | any | Handed to the script as the `args` global, verbatim. Must be JSON-shaped |
 | `resumeFromRunId` | string | Replay an earlier run in this session. Matches `^wf_[a-z0-9-]{6,}$` |
+| `timeout` | number | Wall-clock budget in **minutes** of active run time (paused time excluded). The run is killed when it expires — for bounded sweeps, not open-ended research. Omit for unlimited |
 | `title` / `description` | string | Accepted and ignored — for Claude Code parity, so a ported call does not fail. A workflow is named by its `meta` block |
 
 At least one of `script` / `scriptPath` / `name` is required; `scriptPath` wins over `script`, which wins over `name`.

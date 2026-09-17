@@ -73,7 +73,7 @@ import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/met
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
-import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -2405,6 +2405,12 @@ Terse command-style prompts produce shallow, generic work.
         },
       });
       completeWorkflowTask(task, result);
+      // Name the cause: the runtime only knows it was aborted, not that a
+      // budget did it. Pauses excluded by construction (the timer never
+      // ticks while held). Minutes, matching the tool param's unit.
+      if (task.timeoutFired && result.status === "killed" && task.timeoutMs) {
+        task.error = `Workflow timed out after ${Math.max(1, Math.round(task.timeoutMs / 60_000))}m of active run time (pauses excluded).`;
+      }
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
     }
@@ -2482,6 +2488,12 @@ Terse command-style prompts produce shallow, generic work.
           pattern: "^wf_[a-z0-9-]{6,}$",
           description:
             "Run id of an earlier workflow in this session. Its unchanged leading agent() calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live. Same script and args means nothing re-runs.",
+        }),
+      ),
+      timeout: Type.Optional(
+        Type.Number({
+          description:
+            "Wall-clock budget in minutes of active run time (paused time excluded). The run is killed when it expires — use for bounded sweeps, not open-ended research. Omit for unlimited.",
         }),
       ),
       // Accepted and ignored, as in Claude Code. Models reach for them because
@@ -2577,6 +2589,12 @@ Terse command-style prompts produce shallow, generic work.
 
       const replay = resumeFrom !== undefined ? readJournal(resumeFrom.journalPath) : undefined;
 
+      // Minutes, model-authored: finite and positive wins, anything else is
+      // unlimited (0/negative cannot mean "kill immediately" — that would
+      // turn a typo into a run that can never start).
+      const timeoutMs = typeof params.timeout === "number" && Number.isFinite(params.timeout) && params.timeout > 0
+        ? Math.round(params.timeout * 60_000)
+        : undefined;
       const task = createWorkflowTask({
         id: runId,
         script: resolved.script,
@@ -2586,8 +2604,14 @@ Terse command-style prompts produce shallow, generic work.
         toolCallId,
         ...(journalPath !== undefined ? { journalPath } : {}),
         ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       });
       workflowTasks.set(runId, task);
+      // Budget starts now: expiry aborts through the normal kill path, and
+      // the settle below rewrites the generic abort error with the cause.
+      armWorkflowTimeout(task, () => {
+        task.abortController.abort();
+      });
       // The run's own row has to appear now, not when it settles. Its agents
       // are owned by it, so their lifecycle callbacks no longer refresh these
       // surfaces — nothing else would register the widget for a run whose

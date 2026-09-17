@@ -12,8 +12,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkflowControl } from "../src/workflow/runtime.js";
 import {
+  activeElapsedMs,
+  armWorkflowTimeout,
   completeWorkflowTask,
   createWorkflowTask,
+  disarmWorkflowTimeout,
   failWorkflowTask,
   pauseWorkflowTask,
   resumeWorkflowTask,
@@ -128,5 +131,80 @@ describe("settling a run", () => {
 
     expect(task.control).toBeUndefined();
     expect(task.status).toBe("failed");
+  });
+});
+
+describe("workflow wall-clock budget", () => {
+  it("fires on expiry and marks the task", async () => {
+    const { task } = runningTask();
+    task.startTime = Date.now() - 1000;
+    task.timeoutMs = 1100;
+    let fired = 0;
+    armWorkflowTimeout(task, () => { fired++; });
+    await new Promise(r => setTimeout(r, 300));
+    expect(fired).toBe(1);
+    expect(task.timeoutFired).toBe(true);
+    disarmWorkflowTimeout(task);
+  });
+
+  it("unset or non-positive budgets arm nothing", () => {
+    const { task } = runningTask();
+    armWorkflowTimeout(task, () => { throw new Error("must not fire"); });
+    expect(task.timeoutTimer).toBeUndefined();
+    task.timeoutMs = 0;
+    armWorkflowTimeout(task, () => { throw new Error("must not fire"); });
+    expect(task.timeoutTimer).toBeUndefined();
+    task.timeoutMs = -5;
+    armWorkflowTimeout(task, () => { throw new Error("must not fire"); });
+    expect(task.timeoutTimer).toBeUndefined();
+  });
+
+  it("pausing stops the clock: resume re-arms on the remainder", async () => {
+    const { task, control } = runningTask();
+    void control;
+    task.startTime = 1_000;
+    task.timeoutMs = 10_000;
+    const fired: number[] = [];
+    armWorkflowTimeout(task, () => { fired.push(Date.now()); }, 5_000);
+    expect(task.timeoutTimer).toBeDefined();
+    // Pause at t=5s with 6s banked: 4s of budget remain, timer cleared.
+    pauseWorkflowTask(task, 5_000);
+    expect(task.timeoutTimer).toBeUndefined();
+    await new Promise(r => setTimeout(r, 50));
+    expect(fired).toEqual([]);
+    // Resume re-arms for the ~4s remainder.
+    resumeWorkflowTask(task, 6_000);
+    expect(task.timeoutTimer).toBeDefined();
+    expect(task.totalPausedMs).toBe(1_000);
+    disarmWorkflowTimeout(task);
+  });
+
+  it("an already-exceeded budget fires immediately on arm", async () => {
+    const { task } = runningTask();
+    task.startTime = 1_000;
+    task.timeoutMs = 1_000;
+    let fired = 0;
+    armWorkflowTimeout(task, () => { fired++; }, 10_000);
+    await new Promise(r => setTimeout(r, 20));
+    expect(fired).toBe(1);
+    expect(task.timeoutFired).toBe(true);
+  });
+
+  it("settling disarms the timer", () => {
+    const { task } = runningTask();
+    task.timeoutMs = 60_000;
+    armWorkflowTimeout(task, () => {});
+    expect(task.timeoutTimer).toBeDefined();
+    completeWorkflowTask(task, { status: "completed", value: "done", meta: { name: "t" }, agentCount: 0, replayedCount: 0 } as any);
+    expect(task.timeoutTimer).toBeUndefined();
+  });
+
+  it("activeElapsedMs excludes banked and open pauses", () => {
+    const { task } = runningTask();
+    task.startTime = 1_000;
+    task.totalPausedMs = 2_000;
+    expect(activeElapsedMs(task, 11_000)).toBe(8_000);
+    task.pausedAt = 9_000;
+    expect(activeElapsedMs(task, 11_000)).toBe(6_000);
   });
 });
