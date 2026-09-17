@@ -14,7 +14,7 @@
 
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { formatResumeRow } from "../resume-filtered.js";
-import { searchRows, type SessionTreeNode, toggleExpanded, type TreeRow, visibleRows } from "../session-tree.js";
+import { type SessionTreeNode, searchRows, type TreeRow, toggleExpanded, visibleRows } from "../session-tree.js";
 
 /** Minimal theme surface (real theme in prod, identity fns in tests). */
 export interface ResumeTreeTheme {
