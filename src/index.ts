@@ -20,7 +20,7 @@ import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent, topLevelStopRefusal } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, resolveSubagentSessionDir, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -33,7 +33,6 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { mergeSessionLists, runResumeFiltered, toResumeSession } from "./resume-filtered.js";
 import { resolveWorkflowAgent } from "./workflow/control.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -60,7 +59,6 @@ import {
   type UICtx,
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
-import { createResumeTreePicker } from "./ui/resume-tree-picker.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
 import { countSnoozedAgents, countStalledAgents, renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
@@ -4379,88 +4377,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
     handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
   });
 
-  // Core's /resume is hardcoded ahead of extension commands, so its picker
-  // can be neither filtered nor collapsed from here. This parallel command
-  // lists the same store and hides spawned (subagent) sessions — the entries
-  // that bury real conversations under hundreds of general-purpose#… rows.
-  pi.registerCommand("resume-filtered", {
-    description: "Resume a session from a collapsible tree (children collapsed by default; non-tui falls back to hiding subagent sessions)",
-    handler: async (args, ctx) => {
-      await runResumeFiltered(
-        {
-          // Same loaders core's picker uses for its current/all scopes,
-          // plus the segregated subagent dir: core's flat per-dir reads
-          // never see it, so the tree merges it back explicitly (dedupe by
-          // path — a file belongs to exactly one dir, this is just safety).
-          // All-scope stays interactive-only: subagent dirs are per-folder.
-          listCurrent: async () => {
-            const cwd = ctx.sessionManager.getCwd();
-            const dir = ctx.sessionManager.getSessionDir();
-            const main = (await SessionManager.list(cwd, dir)).map(toResumeSession);
-            const nested = resolveSubagentSessionDir(undefined, dir, () => {});
-            if (nested === undefined || nested === dir) return main;
-            const sub = (await SessionManager.list(cwd, nested)).map(toResumeSession);
-            return mergeSessionLists([main, sub]);
-          },
-          listAll: async () => (await SessionManager.listAll()).map(toResumeSession),
-          currentSessionFile: () => ctx.sessionManager.getSessionFile?.(),
-          // Stub rows for parents living in another scope dir (e.g. a
-          // devmate session): header + first session_info name, capped scan.
-          // Anything unreadable stays a plain root — never fail the listing.
-          resolveExternalParent: (parentPath) => {
-            try {
-              if (!existsSync(parentPath)) return undefined;
-              const content = readFileSync(parentPath, "utf8");
-              const lines = content.split("\n");
-              let cwd = "";
-              let modified = new Date(0);
-              try {
-                const header = JSON.parse(lines[0]);
-                cwd = (header.cwd as string) ?? "";
-                if (typeof header.timestamp === "string") modified = new Date(header.timestamp);
-              } catch { /* header unparseable: stub with path only */ }
-              let name: string | undefined;
-              for (const line of lines.slice(1, 500)) {
-                const m = line.match(/"type":"session_info"[^}]*"name":"((?:[^"\\]|\\.)*)"/);
-                if (m) {
-                  try {
-                    name = JSON.parse(`"${m[1]}"`);
-                  } catch { /* keep undefined */ }
-                  break;
-                }
-              }
-              return {
-                path: parentPath,
-                name,
-                parentSessionPath: undefined,
-                messageCount: 0,
-                modified,
-                firstMessage: cwd ? `Session in ${cwd}` : "Session in another scope",
-              };
-            } catch {
-              return undefined;
-            }
-          },
-          // Collapsible tree overlay in tui mode only: custom components
-          // need a terminal (see ExtensionMode docs). Other modes keep the
-          // filtered flat list.
-          pickFromTree: ctx.mode === "tui"
-            ? (roots) =>
-              ctx.ui.custom<string | undefined>((_tui, theme, _kb, done) =>
-                createResumeTreePicker(
-                  { roots, currentFile: ctx.sessionManager.getSessionFile?.() },
-                  theme,
-                  done,
-                ))
-            : undefined,
-          select: (title, options) => ctx.ui.select(title, options),
-          notify: (message, type) => ctx.ui.notify(message, type ?? "info"),
-          switchSession: (path) => ctx.switchSession(path),
-        },
-        args,
-      );
-    },
-  });
 
   /**
    * What `/agents → Workflows` and the fleet list's `workflow` rows need from
