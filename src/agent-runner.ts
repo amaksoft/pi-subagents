@@ -2,7 +2,7 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
-import { mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
@@ -675,36 +675,6 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
-/** Directory name segregating subagent sessions from interactive ones. */
-export const SUBAGENT_SESSION_SUBDIR = ".subagents";
-
-/**
- * Where a subagent session file goes. Explicit per-agent `sessionDir`
- * frontmatter wins outright; otherwise a `.subagents/` subdir of the
- * resolved default. Core's pickers read exactly one directory level
- * (`list` reads the cwd dir, `listAll` walks only the sessions root's
- * immediate children), so the nested dir is invisible to both scopes of
- * `/resume` — while `@handle` resume keeps working off absolute paths.
- * Missing base (no settings default) falls through to core's default,
- * i.e. today's visible behavior. Pure apart from the mkdir, which fails
- * open (falls back) rather than failing the spawn. Tested directly.
- */
-export function resolveSubagentSessionDir(
-  configuredDir: string | undefined,
-  defaultDir: string | undefined,
-  mkdir: (dir: string) => void = dir => mkdirSync(dir, { recursive: true }),
-): string | undefined {
-  if (configuredDir) return configuredDir;
-  if (!defaultDir) return undefined;
-  const nested = join(defaultDir, SUBAGENT_SESSION_SUBDIR);
-  try {
-    mkdir(nested);
-  } catch {
-    return defaultDir;
-  }
-  return nested;
-}
-
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -1053,9 +1023,6 @@ export async function runAgent(
   const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
-  // Segregate: subagent sessions file out of the interactive store's sight
-  // (see resolveSubagentSessionDir) unless the agent file says otherwise.
-  const sessionDir = resolveSubagentSessionDir(configuredSessionDir, defaultSessionDir);
   // Frontmatter wins when it says anything; otherwise the project default,
   // which `rememberAgents` supplies for top-level agents only. Same precedence
   // as `outputTranscript`.
@@ -1064,9 +1031,9 @@ export async function runAgent(
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
     // apply. `sessionDir` still matters for a later /new or /branch off it.
-    ? SessionManager.open(options.resumeSessionFile, sessionDir)
+    ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
     : persistSession
-      ? SessionManager.create(effectiveCwd, sessionDir, {
+      ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
           // Optional metadata — it only nests the subagent under its spawner in
           // `/resume`. Until `rememberAgents` this ran solely for the rare
           // `persist_session: true` agent; now it runs for every spawn, so a
