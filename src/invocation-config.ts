@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { AgentConfig, IsolationMode, JoinMode, ThinkingLevel } from "./types.js";
+import { MAX_TIMEOUT_MS } from "./workflow/task.js";
 
 /**
  * The model-facing `isolation` parameter, shared by the `Agent` tool and the
@@ -58,6 +59,7 @@ interface AgentInvocationParams {
   model?: string;
   thinking?: string;
   max_turns?: number;
+  timeout?: number;
   run_in_background?: boolean;
   inherit_context?: boolean;
   isolated?: boolean;
@@ -93,6 +95,18 @@ interface ResolveOptions {
   defaultRunInBackground?: boolean;
 }
 
+/**
+ * Caller-authored minutes to an enforced ms budget. Finite and positive
+ * wins; anything else (absent, zero, negative, NaN) is unlimited — 0 must
+ * never mean "kill immediately", or a typo makes a run that cannot start.
+ * Capped so the ms value cannot overflow setTimeout (~24.8 days) into an
+ * instant kill. Shared by top-level and nested callers.
+ */
+export function resolveTimeoutMs(minutes: unknown): number | undefined {
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) return undefined;
+  return Math.min(Math.round(minutes * 60_000), MAX_TIMEOUT_MS);
+}
+
 export function resolveAgentInvocationConfig(
   agentConfig: AgentConfig | undefined,
   params: AgentInvocationParams,
@@ -102,6 +116,12 @@ export function resolveAgentInvocationConfig(
   modelFromParams: boolean;
   thinking?: ThinkingLevel;
   maxTurns?: number;
+  /**
+   * Wall-clock budget in ms, converted from the caller's `timeout` minutes.
+   * Agent files cannot pin it (no frontmatter field): the caller spending
+   * the budget decides it, like max_turns. Undefined = unlimited.
+   */
+  timeoutMs?: number;
   inheritContext: boolean;
   runInBackground: boolean;
   isolated: boolean;
@@ -137,6 +157,7 @@ export function resolveAgentInvocationConfig(
     modelFromParams: agentConfig?.model == null && params.model != null,
     thinking: (agentConfig?.thinking ?? params.thinking) as ThinkingLevel | undefined,
     maxTurns: agentConfig?.maxTurns ?? params.max_turns,
+    timeoutMs: resolveTimeoutMs(params.timeout),
     inheritContext: agentConfig?.inheritContext ?? params.inherit_context ?? false,
     runInBackground: agentConfig?.runInBackground ?? params.run_in_background ?? opts?.defaultRunInBackground ?? false,
     isolated: agentConfig?.isolated ?? params.isolated ?? false,

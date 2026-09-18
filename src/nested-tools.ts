@@ -58,6 +58,7 @@ interface NestedSpawnOptions {
   description: string;
   model?: Model<any>;
   maxTurns?: number;
+  timeoutMs?: number;
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
@@ -150,7 +151,7 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   const text = record.result?.trim() || record.error?.trim() || "No output.";
   const note = position === "inline"
     ? getForegroundOutcomeNote(record.status)
-    : getStatusNote(record.status);
+    : getStatusNote(record.status, record.timeoutFired ? record.timeoutMs : undefined);
   return note ? `Nested agent${note}.\n\n${text}` : text;
 }
 
@@ -182,6 +183,12 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       model: Type.Optional(Type.String({ description: "Optional provider/model override." })),
       thinking: Type.Optional(Type.String({ description: "Optional thinking level." })),
       max_turns: Type.Optional(Type.Number({ minimum: 1 })),
+      timeout: Type.Optional(
+        Type.Number({
+          description:
+            "Wall-clock budget in minutes from run start (queued time is free). Stops with partial output preserved on expiry. Omit for unlimited.",
+        }),
+      ),
       run_in_background: Type.Optional(
         Type.Boolean({
           description: "Defaults to false for nested spawns — the call blocks and returns the child's result inline. Set true only for work you will collect later with get_subagent_result; a detached child is stopped when you finish.",
@@ -271,6 +278,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         description: params.description,
         model,
         maxTurns: invocation.maxTurns,
+        timeoutMs: invocation.timeoutMs,
         isolated: invocation.isolated,
         inheritContext: invocation.inheritContext,
         thinkingLevel: invocation.thinking,

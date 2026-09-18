@@ -26,7 +26,7 @@ import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager, groupCompletionLabel } from "./group-join.js";
-import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
+import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode, resolveTimeoutMs } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -73,7 +73,7 @@ import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/met
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
-import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, MAX_TIMEOUT_MS, resolveEvictedResume, resolveResumeTarget, selectSettledEvictions, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveEvictedResume, resolveResumeTarget, selectSettledEvictions, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -195,7 +195,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number, showC
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
-    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
+    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status, record.timeoutFired ? record.timeoutMs : undefined)}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}${costXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
@@ -1654,6 +1654,12 @@ Terse command-style prompts produce shallow, generic work.
           minimum: 1,
         }),
       ),
+      timeout: Type.Optional(
+        Type.Number({
+          description:
+            "Wall-clock budget in minutes, counted from when the run starts (queued time is free). The run stops with partial output preserved when it expires — use for time-boxing uncertain work. Omit for unlimited (default). Extend a running budget with snooze_subagent.",
+        }),
+      ),
       run_in_background: Type.Optional(
         Type.Boolean({
           description: "Defaults to true — the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline.",
@@ -2099,6 +2105,7 @@ Terse command-style prompts produce shallow, generic work.
           name: params.name as string | undefined,
           model,
           maxTurns: effectiveMaxTurns,
+          timeoutMs: resolvedConfig.timeoutMs,
           isolated,
           inheritContext,
           thinkingLevel: thinking,
@@ -2253,6 +2260,7 @@ Terse command-style prompts produce shallow, generic work.
           name: params.name as string | undefined,
           model,
           maxTurns: effectiveMaxTurns,
+          timeoutMs: resolvedConfig.timeoutMs,
           isolated,
           inheritContext,
           thinkingLevel: thinking,
@@ -2669,21 +2677,12 @@ Terse command-style prompts produce shallow, generic work.
 
       const replay = resumeFrom !== undefined ? readJournal(resumeFrom.journalPath) : undefined;
 
-      // Minutes, model-authored: finite and positive wins, anything else is
-      // unlimited (0/negative cannot mean "kill immediately" — that would
-      // turn a typo into a run that can never start). Capped so the ms value
-      // cannot overflow setTimeout (~24.8 days) into an instant kill.
-      // Invalid-but-present values warn instead of failing: the run is valid,
-      // only its budget is malformed, and failing the call would cost a turn
-      // to re-emit an identical script.
-      let timeoutMs: number | undefined;
-      if (params.timeout === undefined) {
-        timeoutMs = undefined;
-      } else if (typeof params.timeout === "number" && Number.isFinite(params.timeout) && params.timeout > 0) {
-        timeoutMs = Math.min(Math.round(params.timeout * 60_000), MAX_TIMEOUT_MS);
-      } else {
+      // Shared minutes→ms conversion (invalid-but-present warns instead of
+      // failing: the run is valid, only its budget is malformed, and failing
+      // the call would cost a turn to re-emit an identical script).
+      let timeoutMs = resolveTimeoutMs(params.timeout);
+      if (params.timeout !== undefined && timeoutMs === undefined) {
         console.warn(`[pi-subagents] ignoring invalid workflow timeout: ${JSON.stringify(params.timeout)}`);
-        timeoutMs = undefined;
       }
       const task = createWorkflowTask({
         id: runId,
@@ -2950,7 +2949,7 @@ Terse command-style prompts produce shallow, generic work.
 
       let output =
         `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
+        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status, record.timeoutFired ? record.timeoutMs : undefined)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
       if (record.status === "provisioning") {

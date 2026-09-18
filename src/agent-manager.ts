@@ -23,6 +23,7 @@ import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import { reduceSettle, StartupError } from "./domain/agent.js";
+import { MAX_TIMEOUT_MS } from "./workflow/task.js";
 import {
   acquireSlot,
   emptyLedger,
@@ -223,6 +224,12 @@ interface SpawnOptions {
   reclaim?: { handle: string; alias?: string };
   model?: Model<any>;
   maxTurns?: number;
+  /**
+   * Per-run wall-clock budget in ms, counted from kickoff (queued time
+   * excluded). Unset/non-positive = unlimited. Copied to the record at
+   * kickoff; the timer is armed there too.
+   */
+  timeoutMs?: number;
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
@@ -1090,6 +1097,12 @@ export class AgentManager {
     // lease, or children).
     if (record.status === "provisioning") record.status = "running";
     const epoch = record.epoch;
+    // Budget starts here — never at spawn, so queued time is free.
+    if (typeof options.timeoutMs === "number" && options.timeoutMs > 0) {
+      record.timeoutMs = options.timeoutMs;
+    }
+    record.timeoutFired = undefined;
+    this.armRunTimeout(id, record);
     record.promise = promise;
 
     // Notify caller that spawn is complete (record is in the map, promise is set).
@@ -1120,6 +1133,8 @@ export class AgentManager {
    */
   private settleRun(record: AgentRecord, guardCallback: boolean, pool: Pool | undefined): void {
     if (!record.isBackground) record.resultConsumed = true;
+    // Budget over: disarm first so a timer firing mid-settle cannot re-abort.
+    this.disarmRunTimeout(record);
     // Lease release is idempotent (cleared on use): the two startup exits
     // that hand their slot back via releaseSlot() never reach here, and a
     // record that never acquired (pool-less) carries no lease to free.
@@ -1344,6 +1359,11 @@ export class AgentManager {
     // run on this record must not touch the new run.
     record.epoch++;
     const epoch = record.epoch;
+    // Resumes carry no budget: disarm any timer the previous run armed so
+    // an old deadline cannot kill the continuation.
+    this.disarmRunTimeout(record);
+    record.timeoutMs = undefined;
+    record.timeoutFired = undefined;
     // Orphaned lease from an unsettled predecessor (aborted mid-flight):
     // its settle is epoch-barred from releasing, so free it here. A normally
     // settled predecessor already cleared it; foreground resumes never hold
@@ -1485,6 +1505,10 @@ export class AgentManager {
     // record must not touch the new run's status, result, lease, or children.
     record.epoch++;
     const epoch = record.epoch;
+    // Same no-budget rule as the foreground path: continuations run open.
+    this.disarmRunTimeout(record);
+    record.timeoutMs = undefined;
+    record.timeoutFired = undefined;
     // Orphaned lease, same as the foreground path: freed here because the
     // old settle is epoch-barred from touching it. The acquire below then
     // counts exactly the new run's slot.
@@ -1762,6 +1786,8 @@ export class AgentManager {
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
     this.detachQueuedAbort(record);
+    // Eviction must not leave a timer that later aborts a recycled id.
+    this.disarmRunTimeout(record);
     this.tombstone(record);
     // Last chance to finalize the output transcript: eviction skips every
     // settle path, and without this the file handle pins until process end.
@@ -1834,11 +1860,13 @@ export class AgentManager {
   }
 
   /**
-   * Snooze a running agent for `minutes`: forgive the current silence episode
-   * and suppress re-flagging until the window lapses. The judge's "give it
-   * more time" — side-effect-free towards the agent itself (unlike steering,
-   * it sends nothing into the run). Heartbeat, flag clear, and snoozedUntil:
-   * deliberately NOT lastOutputAt (that would fabricate output evidence).
+   * Snooze a running agent for `minutes`: forgive the current silence episode,
+   * suppress re-flagging until the window lapses, and push any run deadline
+   * out by the same window. The judge's "give it more time" —
+   * side-effect-free towards the agent itself (unlike steering, it sends
+   * nothing into the run). Heartbeat, flag clear, snoozedUntil, deadline:
+   * deliberately NOT lastOutputAt (that would fabricate output evidence),
+   * and never arming a deadline on an unlimited run.
    * Returns false when there is nothing to snooze (missing, non-running, or
    * settled record).
    */
@@ -1846,15 +1874,69 @@ export class AgentManager {
     const record = this.agents.get(id);
     if (!record || record.status !== "running") return false;
     const now = Date.now();
+    const windowMs = Math.max(1, minutes) * 60_000;
     record.lastActivityAt = now;
     record.stalledSince = undefined;
-    record.snoozedUntil = now + Math.max(1, minutes) * 60_000;
+    record.snoozedUntil = now + windowMs;
+    if (record.timeoutMs !== undefined && record.timeoutMs > 0) {
+      // Push the deadline out from NOW (not from the original start): the
+      // judge grants fresh time, and the timer re-arms for exactly it.
+      record.timeoutMs = now - record.startedAt + windowMs;
+      record.timeoutFired = undefined;
+      this.armRunTimeout(id, record);
+    }
     return true;
   }
 
   /** Current stall threshold (settings snapshot). */
   getStallThresholdMs(): number {
     return this.stallThresholdMs;
+  }
+
+  /**
+   * Arm the per-run wall-clock budget. Called at kickoff and on snooze
+   * re-arm. `timeoutMs` is total-from-start; the delay is the remainder —
+   * so queued time never counts (armed at kickoff, not spawn) and snooze
+   * recomputes the total and re-arms for exactly the fresh window.
+   * The timer captures the run's epoch: a stale generation firing late
+   * (abort→resume→timer-fires) resolves to a no-op instead of killing
+   * the new run. Unref'd: a budget must never hold the process open.
+   */
+  private armRunTimeout(id: string, record: AgentRecord): void {
+    this.disarmRunTimeout(record);
+    const budget = record.timeoutMs ?? 0;
+    if (budget <= 0) return;
+    const remaining = budget - (Date.now() - record.startedAt);
+    if (remaining <= 0) {
+      // Already exceeded (tiny test budgets, long queue tail): expire on the
+      // next tick rather than aborting synchronously inside the caller.
+      const timer = setTimeout(() => this.expireRunTimeout(id, record, record.epoch), 0);
+      timer.unref?.();
+      record.timeoutTimer = timer;
+      return;
+    }
+    const epoch = record.epoch;
+    const timer = setTimeout(() => this.expireRunTimeout(id, record, epoch), Math.min(remaining, MAX_TIMEOUT_MS));
+    timer.unref?.();
+    record.timeoutTimer = timer;
+  }
+
+  /** Budget timer body: epoch- and liveness-checked abort. */
+  private expireRunTimeout(id: string, record: AgentRecord, epoch: number): void {
+    record.timeoutTimer = undefined;
+    if (record.epoch !== epoch) return;
+    const live = this.agents.get(id);
+    if (live !== record || record.status !== "running") return;
+    record.timeoutFired = true;
+    this.abort(id);
+  }
+
+  /** Clear a budget timer. Idempotent; safe on records that never armed. */
+  private disarmRunTimeout(record: AgentRecord): void {
+    if (record.timeoutTimer !== undefined) {
+      clearTimeout(record.timeoutTimer);
+      record.timeoutTimer = undefined;
+    }
   }
 
   private cleanup() {

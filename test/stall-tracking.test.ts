@@ -312,3 +312,27 @@ describe("threshold-threading", () => {
     expect(countStalledAgents(entries, getRecord, now, 5 * 60_000)).toBe(1);
   });
 });
+
+describe("resolveTimeoutMs", () => {
+  it("converts minutes, rejects the rest, caps the absurd", async () => {
+    const { resolveTimeoutMs } = await import("../src/invocation-config.js");
+    const { MAX_TIMEOUT_MS } = await import("../src/workflow/task.js");
+    expect(resolveTimeoutMs(10)).toBe(600_000);
+    expect(resolveTimeoutMs(undefined)).toBeUndefined();
+    expect(resolveTimeoutMs(0)).toBeUndefined();
+    expect(resolveTimeoutMs(-5)).toBeUndefined();
+    expect(resolveTimeoutMs(Number.NaN)).toBeUndefined();
+    expect(resolveTimeoutMs("10" as never)).toBeUndefined();
+    expect(resolveTimeoutMs(1_000_000)).toBe(MAX_TIMEOUT_MS);
+  });
+});
+
+describe("getStatusNote timeout cause", () => {
+  it("names the budget on timeout stops only", async () => {
+    const { getStatusNote } = await import("../src/status-note.js");
+    expect(getStatusNote("stopped")).toContain("STOPPED before completion");
+    expect(getStatusNote("stopped")).not.toContain("timed out");
+    expect(getStatusNote("stopped", 600_000)).toContain("timed out after 10m");
+    expect(getStatusNote("completed", 600_000)).toBe("");
+  });
+});

@@ -262,6 +262,16 @@ export interface AgentRecord {
   /** Detach for the queued-abort parent-signal listener (see armQueuedAbort). */
   detachQueuedAbort?: () => void;
   /**
+   * Per-run wall-clock budget in ms, armed at kickoff. Unset = unlimited.
+   * Expiry aborts through the normal stop path (partial preserved); the
+   * judge extends it via snooze. Disarmed on every terminal path.
+   */
+  timeoutMs?: number;
+  /** Set when a budget expiry (not a manual stop) ended the run. */
+  timeoutFired?: boolean;
+  /** Live budget timer; cleared on settle, eviction, resume, and snooze-rearm. */
+  timeoutTimer?: ReturnType<typeof setTimeout>;
+  /**
    * Run generation. Spawn creates at 0; every resume increments. Settle
    * handlers capture the epoch at kickoff and ignore completions from older
    * generations: without this, an abort→resume→old-settles sequence lets

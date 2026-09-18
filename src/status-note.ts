@@ -206,10 +206,12 @@ export function describeStall(
  * non-human path and could suppress a legitimate retry ("a human killed it,
  * don't restart") exactly where the stopper itself was about to try again.
  */
-export function getStatusNote(status: string): string {
+export function getStatusNote(status: string, timeoutMs?: number): string {
   switch (status) {
     case "stopped":
-      return " (STOPPED before completion — output is partial; the task was NOT finished)";
+      return timeoutMs !== undefined
+        ? ` (STOPPED before completion — timed out after ${formatStallAge(timeoutMs)}; output is partial)`
+        : " (STOPPED before completion — output is partial; the task was NOT finished)";
     case "aborted":
       return " (aborted — hit the turn limit before completion; output may be incomplete)";
     case "steered":

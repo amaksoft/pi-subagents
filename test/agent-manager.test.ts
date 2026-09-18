@@ -3545,3 +3545,112 @@ describe("epoch guards (abort → resume → old settles)", () => {
     expect(record.error).toBeUndefined();
   });
 });
+
+describe("per-agent run timeout", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("fires on expiry with the flag, through the normal stop path", async () => {
+    const stopped: string[] = [];
+    manager = new AgentManager(undefined, 10, undefined, undefined, undefined, (r) => {
+      stopped.push(r.id);
+    });
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "budgeted",
+      isBackground: true,
+      timeoutMs: 40,
+    } as any);
+    const record = manager.getRecord(id)!;
+    await new Promise(r => setTimeout(r, 0));
+    expect(record.timeoutTimer).toBeDefined();
+    await new Promise(r => setTimeout(r, 120));
+    expect(record.status).toBe("stopped");
+    expect(record.timeoutFired).toBe(true);
+    expect(record.timeoutTimer).toBeUndefined();
+    expect(stopped).toEqual([id]);
+  });
+
+  it("disarms on natural settle: no late abort", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "fast",
+      isBackground: true,
+      timeoutMs: 60,
+    } as any);
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    expect(record.status).toBe("completed");
+    expect(record.timeoutTimer).toBeUndefined();
+    expect(record.timeoutFired).toBeUndefined();
+    await new Promise(r => setTimeout(r, 120));
+    expect(record.status).toBe("completed");
+  });
+
+  it("queued time is free: no timer before kickoff", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const holder = manager.spawn(mockPi, mockCtx, "Explore", "h", { description: "h", isBackground: true });
+    const waiter = manager.spawn(mockPi, mockCtx, "Explore", "w", {
+      description: "w",
+      isBackground: true,
+      timeoutMs: 50,
+    } as any);
+    const queued = manager.getRecord(waiter)!;
+    expect(queued.status).toBe("queued");
+    expect(queued.timeoutTimer).toBeUndefined();
+    await new Promise(r => setTimeout(r, 120));
+    // Still queued (pool full), still no timer, still alive.
+    expect(manager.getRecord(waiter)!.status).toBe("queued");
+    expect(manager.getRecord(holder)!.status).toBe("running");
+    manager.abort(holder);
+  });
+
+  it("resume disarms: continuations run open", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "x",
+      isBackground: true,
+      timeoutMs: 60_000,
+    } as any);
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    record.session = mockSession();
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "more" });
+    await manager.resume(id, "again");
+    expect(record.timeoutMs).toBeUndefined();
+    expect(record.timeoutTimer).toBeUndefined();
+  });
+
+  it("snooze pushes a real deadline out", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "x",
+      isBackground: true,
+      timeoutMs: 100_000,
+    } as any);
+    const record = manager.getRecord(id)!;
+    await new Promise(r => setTimeout(r, 0));
+    expect(manager.snooze(id, 10)).toBe(true);
+    // Deadline pushed ~10min out from now, timer re-armed (defined).
+    expect(record.timeoutMs).toBeGreaterThan(100_000);
+    expect(record.timeoutTimer).toBeDefined();
+    expect(record.status).toBe("running");
+  });
+});
