@@ -490,6 +490,17 @@ Stop a running or queued top-level agent — the kill switch for stuck, looping,
 
 > **Migration note for tool policies:** `stop_subagent` (top-level and nested) is a new tool name. If you gate tools by name (`disallowed_tools`, extension allowlists), add it alongside `Agent` / `get_subagent_result` / `steer_subagent` — pre-existing lists won't cover it. It is strictly less privileged than spawning: it can only stop agents, and the nested one only the parent's own children.
 
+### `workflow_control`
+
+The main session's handles for workflow children — `stop_subagent` refuses them (they belong to their run), so run-scoped addressing reaches them here. Every action delegates to the same transitions the `/agents → Workflows` dialog keys use, so barrier and journal accounting are identical whether a human or the model intervened. Steering is deliberately absent: retry with a narrowed prompt instead of redirecting mid-run.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `action` | enum | yes | `status` (list runs, or one run's agents with stall diagnoses), `stop_agent` (skip one — its barrier call resolves null), `retry_agent` (respawn one, optional narrowed `prompt`), `stop_run` (kill the whole run) |
+| `runId` | string | for everything but bare `status` | Workflow run id (`wf_…`) |
+| `label` / `index` | string / number | for agent actions | Which agent: exact label, then case-insensitive, or numeric index (ambiguity errors list candidates) |
+| `prompt` | string | retry-only | Narrowed replacement instructions for this attempt, journaled distinctly |
+
 ## Commands
 
 | Command | Description |

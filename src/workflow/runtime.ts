@@ -264,8 +264,14 @@ export interface WorkflowControl {
    * Only while it is running — that is the whole window. Once the call has
    * settled its value is already the script's, and re-running would produce a
    * result with nowhere to go.
+   *
+   * With `newPrompt`, the retry runs narrowed/redirected instructions instead
+   * of the original prompt (the incident recovery: replace a wedged broad
+   * review with a bounded one without editing the script). One-shot: consumed
+   * by the next attempt, and the journal keys it distinctly so resume never
+   * confuses it with the original call.
    */
-  retry(index: number): boolean;
+  retry(index: number, newPrompt?: string): boolean;
 }
 
 export interface RunWorkflowOptions {
@@ -642,6 +648,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
     agentId: string;
     started: boolean;
     intent?: "skip" | "retry";
+    /** One-shot narrowed prompt for a retry-with-override; consumed by the next attempt. */
+    retryPrompt?: string;
     /** Wakes it out of a pause hold, so a skip does not wait for a resume. */
     wake?: () => void;
   }
@@ -696,10 +704,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       else live.wake?.();
       return true;
     },
-    retry: index => {
+    retry: (index, newPrompt?) => {
       const live = liveAgents.get(index);
       if (live === undefined || !live.started || live.intent !== undefined) return false;
       live.intent = "retry";
+      if (newPrompt !== undefined) live.retryPrompt = newPrompt;
       host.abortAgent(live.agentId);
       return true;
     },
@@ -921,7 +930,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
         return;
       }
 
-      const key = journalKey(keyInput);
+      // Recomputed (not const) because a retry-with-override re-keys the
+      // call below: same index, different prompt, different journal identity.
+      let key = journalKey(keyInput);
       const resumeMark = payload.resume !== undefined ? ({ resumed: true } as const) : {};
 
       /** A skip the user asked for, before the child ever started. */
@@ -943,6 +954,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       // since changed.
       const intent = (): LiveAgent["intent"] => live.intent;
       let attempt = 1;
+      // Prompt actually spawned with: the original, unless a retry override
+      // replaced it for a later attempt (consumed one-shot at retry time).
+      let attemptPrompt = payload.prompt;
       try {
         for (;;) {
           // Held before the slot, not after: a paused run must not sit on
@@ -1020,7 +1034,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                 : await host.spawnAgent({
                     agentId,
                     index,
-                    prompt: payload.prompt,
+                    prompt: attemptPrompt,
                     label,
                     agentType,
                     ...(model !== undefined ? { model } : {}),
@@ -1075,6 +1089,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           if (intent() === "retry" && !aborted) {
             live.intent = undefined;
             attempt++;
+            // Narrowed retry: swap in the override prompt for this attempt,
+            // re-key so the journal treats it as the distinct call it is
+            // (a resume with the original prompt must not replay it), and
+            // show it on the row. One-shot: consumed here, not sticky.
+            if (live.retryPrompt !== undefined) {
+              key = journalKey({ ...keyInput, prompt: live.retryPrompt });
+              base.promptPreview = preview(live.retryPrompt);
+              attemptPrompt = live.retryPrompt;
+              live.retryPrompt = undefined;
+            }
             emit([{ ...base, queuedAt, attempt, lastAttemptReason: "user-retry" }]);
             continue;
           }

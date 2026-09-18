@@ -34,6 +34,7 @@ import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { runResumeFiltered, toResumeSession } from "./resume-filtered.js";
+import { resolveWorkflowAgent } from "./workflow/control.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, GRACE_TURNS_CEILING, loadSettings, MAX_CONCURRENT_CEILING, MAX_TURNS_CEILING, SUBAGENT_DEPTH_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -3136,6 +3137,131 @@ Terse command-style prompts produce shallow, generic work.
       return textResult(
         `Snoozed agent ${record.id} (${record.description}) for ${minutes} minute${minutes === 1 ? "" : "s"}. ` +
         `No stall flags, nudges, or auto-abort until it lapses; fresh heartbeats still prove life meanwhile.`,
+      );
+    },
+  }));
+
+  // ---- workflow_control tool ----
+
+  // The main session's handles for workflow children: stop_subagent refuses
+  // them (they belong to their run), so run-scoped addressing — never raw
+  // agent ids — reaches them here. Every action delegates to the same
+  // control.* transitions the dialog keys use, so barrier and journal
+  // accounting are identical whether a human or the model intervened.
+  registerToolReportingUsage(defineTool({
+    name: SUBAGENT_TOOL_NAMES.WORKFLOW_CONTROL,
+    label: "Workflow Control",
+    description:
+      "Inspect and intervene in this session's SubagentWorkflow runs. `status` lists runs (omit runId) or one run's agents with stall diagnoses; " +
+      "`stop_agent` skips one (its barrier call resolves null like terminal failure, siblings proceed); " +
+      "`retry_agent` respawns one (optional narrowed `prompt` replaces its instructions for that attempt, journaled distinctly); " +
+      "`stop_run` kills the whole run. Address agents by `label` (exact, then case-insensitive) or numeric `index` — ambiguity errors list candidates. " +
+      "Steering is deliberately absent: retry with a narrowed prompt instead of redirecting mid-run.",
+    promptSnippet: "Inspect or intervene in a workflow run's agents",
+    parameters: Type.Object({
+      action: Type.Union(
+        [Type.Literal("status"), Type.Literal("stop_agent"), Type.Literal("retry_agent"), Type.Literal("stop_run")],
+        { description: "What to do." },
+      ),
+      runId: Type.Optional(Type.String({ description: "Workflow run id (wf_…). Omit with status to list runs." })),
+      label: Type.Optional(Type.String({ description: "Agent label within the run." })),
+      index: Type.Optional(Type.Number({ description: "Agent index within the run (unambiguous; shown by status)." })),
+      prompt: Type.Optional(
+        Type.String({
+          description: "Retry-only: narrowed replacement instructions for this attempt. Anything else rejects it.",
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      const action = params.action as string;
+      if (params.prompt !== undefined && action !== "retry_agent") {
+        return textResult("`prompt` only combines with `retry_agent` — it replaces that attempt's instructions.");
+      }
+      if (params.runId === undefined) {
+        if (action !== "status") return textResult("`runId` is required for every action except `status`.");
+        if (workflowTasks.size === 0) return textResult("No workflow runs in this session.");
+        return textResult(
+          [...workflowTasks.values()]
+            .map(t => {
+              const states = cachedChildStates(t);
+              const tail = `${t.doneCount}/${t.agentCount} agents` +
+                (states.stalled > 0 ? ` · ${states.stalled} stalled` : "") +
+                (states.snoozed > 0 ? ` · ${states.snoozed} snoozed` : "");
+              return `${t.id} [${t.status}] ${t.meta?.name ?? t.workflowName ?? "(unnamed)"} — ${tail}`;
+            })
+            .join("\n"),
+        );
+      }
+      const task = workflowTasks.get(params.runId);
+      if (!task) {
+        const known = [...workflowTasks.keys()].join(", ");
+        return textResult(
+          `No workflow run "${params.runId}" in this session.` +
+          (known ? ` Runs: ${known}.` : " Nothing has run yet — resumed runs evicted from memory keep journals on disk; pass resumeFromRunId to SubagentWorkflow, not here."),
+        );
+      }
+      if (action === "status") {
+        const agents = task.workflowProgress.filter(e => e.type === "workflow_agent") as {
+          index: number;
+          label: string;
+          state: string;
+          resultPreview?: string;
+          error?: string;
+          attempt?: number;
+          recordId?: string;
+        }[];
+        if (agents.length === 0) return textResult(`Run ${task.id} [${task.status}]: no agents yet.`);
+        const threshold = manager.getStallThresholdMs();
+        return textResult(
+          `Run ${task.id} [${task.status}] ${task.meta?.name ?? ""}\n` +
+          agents
+            .map(a => {
+              const rec = a.recordId ? manager.getRecord(a.recordId) : undefined;
+              const stall = rec ? describeStall(rec, Date.now(), threshold) : undefined;
+              const bits = [`#${a.index} ${a.label}`, a.state];
+              if (a.attempt !== undefined && a.attempt > 1) bits.push(`attempt ${a.attempt}`);
+              if (stall) bits.push(stall);
+              if (a.error) bits.push(`error: ${a.error.slice(0, 120)}`);
+              else if (a.resultPreview) bits.push(`output: ${a.resultPreview.slice(0, 120)}`);
+              return bits.join(" · ");
+            })
+            .join("\n"),
+        );
+      }
+      if (action === "stop_run") {
+        if (task.status !== "running" && task.status !== "paused") {
+          return textResult(`Run ${task.id} already ${task.status} — nothing to stop.`);
+        }
+        task.abortController.abort();
+        return textResult(`Stopped workflow run ${task.id}. Partial results stand; resume from its journal to continue.`);
+      }
+      // stop_agent / retry_agent: resolve the address, then delegate.
+      const entries = task.workflowProgress
+        .filter(e => e.type === "workflow_agent")
+        .map(e => ({ index: (e as { index: number }).index, label: (e as { label: string }).label }));
+      const resolved = resolveWorkflowAgent(entries, { label: params.label, index: params.index });
+      if (!resolved.ok) return textResult(resolved.message);
+      if (!task.control) {
+        return textResult(`Run ${task.id} is ${task.status} — its agents can no longer be reached. Resume it to act.`);
+      }
+      if (action === "stop_agent") {
+        if (!task.control.skip(resolved.index)) {
+          return textResult(`Agent #${resolved.index} in run ${task.id} already settled or skipped — nothing to stop.`);
+        }
+        return textResult(
+          `Skipped agent #${resolved.index} in run ${task.id}. Its barrier call resolves null like terminal failure; siblings proceed.`,
+        );
+      }
+      // retry_agent (prompt already validated above).
+      if (!task.control.retry(resolved.index, params.prompt)) {
+        return textResult(
+          `Agent #${resolved.index} in run ${task.id} is not running — only a live agent can be retried` +
+          (params.prompt !== undefined ? ", narrowed or not" : "") + ".",
+        );
+      }
+      return textResult(
+        `Retrying agent #${resolved.index} in run ${task.id} as a new attempt` +
+        (params.prompt !== undefined ? " with narrowed instructions (journaled distinctly)" : "") + ".",
       );
     },
   }));

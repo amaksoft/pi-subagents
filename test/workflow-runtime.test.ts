@@ -837,6 +837,39 @@ describe("run control", () => {
       lastAttemptReason: "user-retry",
     });
   });
+  it("retries with a narrowed prompt, journaled distinctly", async () => {
+    const prompts: string[] = [];
+    const release = new Map<string, (r: WorkflowSpawnResult) => void>();
+    const host: WorkflowHost = {
+      spawnAgent(request: any) {
+        prompts.push(request.prompt);
+        return new Promise<WorkflowSpawnResult>(resolve => {
+          release.set(request.agentId, resolve);
+        });
+      },
+      abortAgent(agentId: string) {
+        release.get(agentId)?.({ ok: false, skipped: true, error: "Stopped." });
+      },
+    };
+    let control: WorkflowControl | undefined;
+    const done = run("return await agent('one');", {
+      host,
+      onControl: c => { control = c; },
+    });
+
+    await until(() => prompts.length === 1, "the first attempt to start");
+    expect(control?.retry(0, "narrowed: answer from the design text alone")).toBe(true);
+
+    await until(() => prompts.length === 2, "the narrowed attempt to start");
+    expect(prompts[1]).toBe("narrowed: answer from the design text alone");
+    release.get("wf-agent-0")?.({ ok: true, text: "narrow answer" });
+
+    const result = await done;
+    expect(result.value).toBe("narrow answer");
+    const last = agentEntries(result.progress).at(-1)!;
+    expect(last).toMatchObject({ state: "done", attempt: 2, lastAttemptReason: "user-retry" });
+  });
+
 
   it("refuses to act on an agent that is not live", async () => {
     const stub = controllableHost();
@@ -1344,3 +1377,4 @@ describe("nested workflow()", () => {
     expect(replayHost.calls).toHaveLength(0);
   });
 });
+
