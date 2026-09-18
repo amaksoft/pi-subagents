@@ -2815,3 +2815,43 @@ describe("resolveDefaultModel", () => {
     expect(resolveDefaultModel(undefined, registry([haiku]), undefined)).toBeUndefined();
   });
 });
+
+describe("resolveSubagentSessionDir", () => {
+  it("prefers explicit per-agent dirs, nests by default, passes through missing bases", async () => {
+    const { resolveSubagentSessionDir, SUBAGENT_SESSION_SUBDIR } = await import("../src/agent-runner.js");
+    expect(SUBAGENT_SESSION_SUBDIR).toBe(".subagents");
+    const made: string[] = [];
+    expect(resolveSubagentSessionDir("/custom/dir", "/default/dir", d => { made.push(d); })).toBe("/custom/dir");
+    expect(made).toEqual([]);
+    expect(resolveSubagentSessionDir(undefined, "/default/dir", d => { made.push(d); })).toBe(
+      "/default/dir/.subagents",
+    );
+    expect(made).toEqual(["/default/dir/.subagents"]);
+    expect(resolveSubagentSessionDir(undefined, undefined)).toBeUndefined();
+    // Unwritable base falls back to the visible default, never throws.
+    expect(
+      resolveSubagentSessionDir(undefined, "/default/dir", () => {
+        throw new Error("denied");
+      }),
+    ).toBe("/default/dir");
+  });
+});
+
+describe("subagent session segregation", () => {
+  it("files new sessions under .subagents/ of the default dir", async () => {
+    const { session } = createSession("SEG");
+    createAgentSession.mockResolvedValue({ session });
+    const base = mkdtempSync(join(tmpdir(), "sess-dir-"));
+    settingsManagerGetSessionDir.mockReturnValue(base);
+    try {
+      await runAgent(ctx, "Explore", "go", { pi });
+    } finally {
+      settingsManagerGetSessionDir.mockReturnValue(undefined);
+    }
+
+    expect(sessionManagerCreate).toHaveBeenCalled();
+    const dir = vi.mocked(sessionManagerCreate).mock.calls[0][1] as string;
+    expect(dir).toBe(join(base, ".subagents"));
+    rmSync(base, { recursive: true, force: true });
+  });
+});

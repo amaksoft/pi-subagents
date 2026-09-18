@@ -162,3 +162,17 @@ describe("runResumeFiltered tree mode", () => {
     expect(d.select).not.toHaveBeenCalled();
   });
 });
+
+describe("mergeSessionLists", () => {
+  it("dedupes by path, keeping first-seen order", async () => {
+    const { mergeSessionLists } = await import("../src/resume-filtered.js");
+    const a = (path: string) =>
+      ({ path, messageCount: 1, modified: new Date(), firstMessage: "x" }) as any;
+    expect(mergeSessionLists([[a("/s/1"), a("/s/2")], [a("/s/2"), a("/s/3")]]).map(s => s.path)).toEqual([
+      "/s/1",
+      "/s/2",
+      "/s/3",
+    ]);
+    expect(mergeSessionLists([[], []])).toEqual([]);
+  });
+});

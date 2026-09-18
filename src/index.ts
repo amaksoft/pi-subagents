@@ -20,7 +20,7 @@ import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent, topLevelStopRefusal } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, resolveSubagentSessionDir, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -33,7 +33,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { runResumeFiltered, toResumeSession } from "./resume-filtered.js";
+import { mergeSessionLists, runResumeFiltered, toResumeSession } from "./resume-filtered.js";
 import { resolveWorkflowAgent } from "./workflow/control.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -4388,9 +4388,20 @@ Write the file using the write tool. Only write the file, nothing else.`;
     handler: async (args, ctx) => {
       await runResumeFiltered(
         {
-          // Same loaders core's picker uses for its current/all scopes.
-          listCurrent: async () =>
-            (await SessionManager.list(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionDir())).map(toResumeSession),
+          // Same loaders core's picker uses for its current/all scopes,
+          // plus the segregated subagent dir: core's flat per-dir reads
+          // never see it, so the tree merges it back explicitly (dedupe by
+          // path — a file belongs to exactly one dir, this is just safety).
+          // All-scope stays interactive-only: subagent dirs are per-folder.
+          listCurrent: async () => {
+            const cwd = ctx.sessionManager.getCwd();
+            const dir = ctx.sessionManager.getSessionDir();
+            const main = (await SessionManager.list(cwd, dir)).map(toResumeSession);
+            const nested = resolveSubagentSessionDir(undefined, dir, () => {});
+            if (nested === undefined || nested === dir) return main;
+            const sub = (await SessionManager.list(cwd, nested)).map(toResumeSession);
+            return mergeSessionLists([main, sub]);
+          },
           listAll: async () => (await SessionManager.listAll()).map(toResumeSession),
           currentSessionFile: () => ctx.sessionManager.getSessionFile?.(),
           // Stub rows for parents living in another scope dir (e.g. a

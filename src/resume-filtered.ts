@@ -133,6 +133,17 @@ export async function runResumeFiltered(deps: ResumeFilteredDeps, args: string):
   }
 }
 
+/**
+ * Merge per-scope listings (default dir + segregated subagent dir) into one
+ * list, deduplicated by path. A file belongs to exactly one dir, so this is
+ * safety rather than logic — but two loaders must never double a row.
+ */
+export function mergeSessionLists(lists: ResumeSession[][]): ResumeSession[] {
+  const seen = new Map<string, ResumeSession>();
+  for (const list of lists) for (const s of list) if (!seen.has(s.path)) seen.set(s.path, s);
+  return [...seen.values()];
+}
+
 /** Adapt a full SessionInfo to the structural subset (drops nothing). */
 export function toResumeSession(info: SessionInfo): ResumeSession {
   return {
