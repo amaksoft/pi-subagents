@@ -161,7 +161,8 @@ export async function cleanupWorktree(
       if (currentSha === worktree.baseSha) {
         // No changes — remove worktree
         step = "remove";
-        await removeWorktree(pi, cwd, worktree.path);
+        const removalError = await removeWorktree(pi, cwd, worktree.path);
+        if (removalError) return { hasChanges: true, path: worktree.path, error: `remove: ${removalError}` };
         return { hasChanges: false };
       }
     }
@@ -180,13 +181,16 @@ export async function cleanupWorktree(
     // Update branch name in worktree info for the caller
     worktree.branch = branchName;
 
-    // Remove the worktree (branch persists in main repo)
-    await removeWorktree(pi, cwd, worktree.path);
+    // Remove the worktree (branch persists in main repo). If removal fails,
+    // retain the valid branch in the structured result while also naming the
+    // preserved worktree path and cleanup error.
+    const removalError = await removeWorktree(pi, cwd, worktree.path);
 
     return {
       hasChanges: true,
       branch: worktree.branch,
       path: worktree.path,
+      ...(removalError ? { error: `remove: ${removalError}` } : {}),
     };
   } catch (err) {
     // Never report clean on failure, and never remove what we could not
@@ -194,7 +198,6 @@ export async function cleanupWorktree(
     // step so the parent can say where the work is, not just that it failed.
     const detail = err instanceof Error ? err.message : String(err);
     const error = `${step}: ${detail}`;
-    console.warn(`[pi-subagents] worktree cleanup failed, preserving ${worktree.path}: ${error}`);
     return { hasChanges: true, path: worktree.path, error };
   }
 }
@@ -202,17 +205,20 @@ export async function cleanupWorktree(
 /**
  * Force-remove a worktree.
  */
-async function removeWorktree(pi: ExtensionAPI, cwd: string, worktreePath: string): Promise<void> {
+async function removeWorktree(pi: ExtensionAPI, cwd: string, worktreePath: string): Promise<string | undefined> {
   try {
     await git(pi, cwd, ["worktree", "remove", "--force", worktreePath], 10000);
-  } catch (err) {
-    // If git worktree remove fails, try pruning — and say so either way, so
-    // a stranded copy is diagnosable instead of silently accumulating.
-    console.warn(`[pi-subagents] worktree remove failed for ${worktreePath}, pruning: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  } catch (removeErr) {
+    // A failed remove can leave only a stale registration. Prune it without
+    // writing to stdout/stderr: raw console output corrupts Pi's live TUI.
+    const removeDetail = removeErr instanceof Error ? removeErr.message : String(removeErr);
     try {
       await git(pi, cwd, ["worktree", "prune"], 5000);
+      return `worktree remove failed: ${removeDetail}; stale registration was pruned but ${worktreePath} may remain`;
     } catch (pruneErr) {
-      console.warn(`[pi-subagents] worktree prune failed for ${worktreePath}: ${pruneErr instanceof Error ? pruneErr.message : String(pruneErr)}`);
+      const pruneDetail = pruneErr instanceof Error ? pruneErr.message : String(pruneErr);
+      return `worktree remove failed: ${removeDetail}; prune failed: ${pruneDetail}`;
     }
   }
 }
@@ -222,8 +228,15 @@ async function removeWorktree(pi: ExtensionAPI, cwd: string, worktreePath: strin
  */
 export async function pruneWorktrees(pi: ExtensionAPI, cwd: string): Promise<void> {
   try {
-    await git(pi, cwd, ["worktree", "prune"], 5000);
-  } catch (err) {
-    console.warn(`[pi-subagents] worktree prune failed in ${cwd}: ${err instanceof Error ? err.message : String(err)}`);
+    // `dispose()` may run from a non-repository cwd (for example a home
+    // directory or a remote host path). That is an expected no-op, not a
+    // warning. Resolve the repository first so git's diagnostic can never be
+    // written directly into Pi's alternate-screen TUI.
+    const root = await git(pi, cwd, ["rev-parse", "--show-toplevel"], 5000);
+    if (!root) return;
+    await git(pi, root, ["worktree", "prune"], 5000);
+  } catch {
+    // Crash-recovery pruning is best effort. Cleanup failures for an actual
+    // agent worktree are returned through WorktreeCleanupResult instead.
   }
 }

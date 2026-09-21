@@ -1037,6 +1037,9 @@ export class AgentManager {
             // what a human reads, so the note still belongs on it.
             record.result = (record.result ?? "") +
               `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+            if (wtResult.error) {
+              record.result = `⚠ Worktree removal failed (${wtResult.error}); the branch is safe and the copy remains at \`${wtResult.path ?? "unknown path"}\`.\n\n---\n\n` + record.result;
+            }
           } else if (wtResult.error) {
             // Cleanup failed mid-flight: the copy is preserved (see path) and
             // the parent must know the work is stranded, not merged.
@@ -2074,20 +2077,16 @@ export class AgentManager {
     const sessions = [...this.agents.values()].map(record => record.session);
     this.agents.clear();
     this.startups.clear();
+    const cleanup: Promise<unknown>[] = sessions.map(session => shutdownChildSession(session));
     if (pi) {
-      // Prune any orphaned git worktrees (crash recovery). Detached: dispose runs
-      // on the shutdown path, which cannot wait for git. Started before the awaited
-      // shutdown below rather than after it, so the git calls have that window to
-      // finish in instead of racing the process exit that follows.
-      const prune = (repo: string) => { pruneWorktrees(pi, repo).catch(() => {}); };
-      prune(process.cwd());
-      // Also prune repos that caller-supplied cwds created worktrees in — a clean
-      // exit with in-flight agents would otherwise leave stale registrations there.
-      for (const repo of this.worktreeRepos) prune(repo);
+      // Prune orphaned registrations concurrently with child shutdown. A cwd that
+      // is not a repository is an expected no-op; pruneWorktrees validates it
+      // silently so diagnostics never write through Pi's alternate-screen TUI.
+      const repos = new Set([process.cwd(), ...this.worktreeRepos]);
+      cleanup.push(...[...repos].map(repo => pruneWorktrees(pi, repo)));
     }
-    // Awaited, unlike the eviction path: pi awaits this extension's `session_shutdown`
-    // handler and the process exits right after it returns, so anything left unawaited
-    // here never runs at all. Bounded — each call carries its own ceiling, concurrently.
-    await Promise.all(sessions.map(session => shutdownChildSession(session)));
+    // Pi awaits session_shutdown, so every bounded cleanup operation must be
+    // included here rather than detached and allowed to race process exit.
+    await Promise.allSettled(cleanup);
   }
 }

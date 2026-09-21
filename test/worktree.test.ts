@@ -340,9 +340,9 @@ describe("worktree", () => {
       try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
     });
 
-    it("falls back to pruning when `git worktree remove` fails", async () => {
-      // Removal failing is not fatal — the registration is pruned instead, and
-      // the caller still hears that there were no changes.
+    it("reports a preserved path when remove fails even if registration pruning succeeds", async () => {
+      // Pruning can clean the registration but cannot delete an existing
+      // worktree directory, so the caller must not receive a clean result.
       const wt = (await createWorktree(pi, repoDir, "remove-fails"))!;
       const failing = failingPi(
         args => args[0] === "worktree" && args[1] === "remove",
@@ -351,8 +351,28 @@ describe("worktree", () => {
 
       const result = await cleanupWorktree(failing, repoDir, wt, "removal fails");
 
-      expect(result.hasChanges).toBe(false);
+      expect(result.hasChanges).toBe(true);
+      expect(result.path).toBe(wt.path);
+      expect(result.error).toMatch(/remove.*pruned/);
       expect(vi.mocked(failing.exec).mock.calls.some(([, args]) => args[0] === "worktree" && args[1] === "prune")).toBe(true);
+      try { execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+    });
+
+    it("returns a structured cleanup error without raw console output when remove and prune both fail", async () => {
+      const wt = (await createWorktree(pi, repoDir, "remove-prune-fails"))!;
+      const failing = failingPi(
+        args => args[0] === "worktree" && (args[1] === "remove" || args[1] === "prune"),
+        { code: 1, killed: false },
+      );
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const result = await cleanupWorktree(failing, repoDir, wt, "removal and prune fail");
+
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+      expect(result.hasChanges).toBe(true);
+      expect(result.error).toMatch(/remove.*prune/);
+      expect(existsSync(wt.path)).toBe(true);
       try { execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
     });
   });
@@ -362,13 +382,38 @@ describe("worktree", () => {
       await expect(pruneWorktrees(pi, repoDir)).resolves.toBeUndefined();
     });
 
-    it("does not reject on non-git directory", async () => {
+    it("silently skips a non-git directory without attempting prune", async () => {
       const nonGit = mkdtempSync(join(tmpdir(), "pi-wt-nongit-"));
+      const real = mockPi();
+      const quietPi = { exec: vi.fn(real.exec.bind(real)) } as unknown as ExtensionAPI;
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
-        await expect(pruneWorktrees(pi, nonGit)).resolves.toBeUndefined();
+        await expect(pruneWorktrees(quietPi, nonGit)).resolves.toBeUndefined();
+        expect(warn).not.toHaveBeenCalled();
+        expect(vi.mocked(quietPi.exec).mock.calls.some(([, args]) => args[0] === "worktree" && args[1] === "prune")).toBe(false);
       } finally {
+        warn.mockRestore();
         rmSync(nonGit, { recursive: true, force: true });
       }
+    });
+
+    it("retains a successfully created branch when later removal and prune both fail", async () => {
+      const wt = (await createWorktree(pi, repoDir, "dirty-remove-fails"))!;
+      writeFileSync(join(wt.path, "preserved.txt"), "preserve me");
+      const failing = failingPi(
+        args => args[0] === "worktree" && (args[1] === "remove" || args[1] === "prune"),
+        { code: 1, killed: false },
+      );
+
+      const result = await cleanupWorktree(failing, repoDir, wt, "dirty removal fails");
+
+      expect(result.hasChanges).toBe(true);
+      expect(result.branch).toBe("pi-agent-dirty-remove-fails");
+      expect(result.path).toBe(wt.path);
+      expect(result.error).toMatch(/remove.*prune/);
+      expect(execFileSync("git", ["branch", "--list", result.branch!], { cwd: repoDir, stdio: "pipe" }).toString()).toContain(result.branch!);
+      try { execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+      try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
     });
   });
 });
@@ -392,8 +437,11 @@ describe("cleanupWorktree — failure path", () => {
     const wt = (await createWorktree(pi, repoDir, "fail-commit"))!;
     writeFileSync(join(wt.path, "new-file.txt"), "agent wrote this");
     const bad = failingPi((args) => args[0] === "commit", { code: 1, killed: false });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const result = await cleanupWorktree(bad, repoDir, wt, "commit fails");
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
     expect(result.hasChanges).toBe(true);
     expect(result.branch).toBeUndefined();
     expect(result.error).toMatch(/commit/);
