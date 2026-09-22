@@ -29,7 +29,6 @@ import {
   emptyLedger,
   poolHasRoom as ledgerHasRoom,
   type Pool,
-  type PoolLedger,
   releaseSlot as releaseLedgerSlot,
   resolvePool,
 } from "./domain/queue.js";
@@ -155,36 +154,6 @@ export function topLevelStopRefusal(record: AgentRecord | undefined, id: string)
     return `Agent "${id}" is not running (status: ${record.status}). Nothing to stop. Use get_subagent_result to read its output.`;
   }
   return undefined;
-}
-
-/**
- * Whether a record occupies one of the `maxConcurrentForeground` slots.
- *
- * Keyed on `blocking` — a caller awaiting this record inline — rather than on
- * `isBackground === false`, because `spawn()` is also the funnel for DETACHED
- * starts (cross-extension RPC, `@handle` mentions, the registry) that may pass
- * `isBackground: false` and are documented to run immediately regardless. Those
- * block nobody, so bounding them buys nothing and would park a record with no
- * one waiting to release it.
- *
- * Nested children are excluded for the same reason as `occupiesPoolSlot`, and
- * more sharply: their parent is blocked *awaiting them*, so queueing a child
- * behind its own parent is a guaranteed deadlock rather than a possible one.
- * Enforced here rather than at the call site so no caller can reintroduce it.
- *
- * A workflow's children go out through `spawnAndWait` and so are `blocking`
- * too, and are excluded on the same `isTopLevelAgent` test as the background
- * pool: the run already caps how many of its agents run at once, and charging
- * them here as well would let one fan-out queue behind a limit meant for the
- * session's own work.
- *
- * Like the background pool this bounds width at the top level only — a parent's
- * own fan-out is limited by nothing but its turn budget.
- */
-function occupiesForegroundSlot(
-  record: Pick<AgentRecord, "blocking" | "parentAgentId" | "workflowId">,
-): boolean {
-  return !!record.blocking && isTopLevelAgent(record);
 }
 
 interface SpawnArgs {

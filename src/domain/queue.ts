@@ -47,8 +47,8 @@ export function resolvePool(
   spawn: { isBackground?: boolean; blocking?: boolean; topLevel: boolean },
   maxForeground: number,
 ): Pool | undefined {
-  if (!!spawn.isBackground && spawn.topLevel) return "background";
-  if (maxForeground > 0 && !!spawn.blocking && spawn.topLevel) return "foreground";
+  if (spawn.isBackground && spawn.topLevel) return "background";
+  if (maxForeground > 0 && spawn.blocking && spawn.topLevel) return "foreground";
   return undefined;
 }
 
