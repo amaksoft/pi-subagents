@@ -70,6 +70,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { runInChildSessionContext } from "./child-context.js";
+import { setSystemPromptText, type PromptStateLike } from "./compat.js";
 import { agentMentionReminder } from "./mention.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 
@@ -95,33 +96,17 @@ export interface MentionCloneResult {
 /** Minimal session shape this needs (structural, for tests). */
 export interface CloneSessionLike {
   agent: {
-    state: {
-      systemPrompt?: string;
-      messages: { role: string; content?: unknown }[];
-    };
+    state: PromptStateLike & { systemPrompt?: string };
   };
 }
 
 /**
  * Copy the live system prompt into a forked session, across pi versions.
- *
- * ≤0.85 holds it as a plain mutable field; 0.86 replays it from the
- * transcript and exposes it read-only (assigning throws in strict-mode
- * ESM — which is what killed `@handle` model-mode mentions on upgrade).
- * Try the assignment first so old cores behave byte-identically, and fall
- * back to prepending a system message, which is the documented 0.86+ path
- * ("content adds instructions") and inert on cores that ignore the role.
- * Pure apart from the two writes; tested against both state shapes.
+ * Thin wrapper over compat.setSystemPromptText (single home for the
+ * version fork); re-exported here so existing importers keep working.
  */
 export function setCloneSystemPrompt(session: CloneSessionLike, systemPrompt: string): void {
-  const state = session.agent.state;
-  try {
-    (state as { systemPrompt?: string }).systemPrompt = systemPrompt;
-    return;
-  } catch {
-    // Getter-only state (0.86+): fall through to the transcript path.
-  }
-  state.messages.unshift({ role: "system", content: systemPrompt });
+  setSystemPromptText(session.agent.state, systemPrompt);
 }
 
 /**

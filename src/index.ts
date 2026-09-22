@@ -23,6 +23,7 @@ import { AgentManager, isTopLevelAgent, topLevelStopRefusal } from "./agent-mana
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
+import { checkCoreContract } from "./compat.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager, groupCompletionLabel } from "./group-join.js";
@@ -815,6 +816,24 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
+    // Upgrade tripwire: probe the host contracts we depend on and say so
+    // loudly when a new pi moves them. Capability checks, not version
+    // strings (see compat.ts) — a missing API degrades somewhere silent
+    // otherwise, exactly like 0.86's systemPrompt and TranscriptContext.
+    // Runs before anything that could need the missing surface.
+    try {
+      const problems = checkCoreContract({
+        sessionManager: ctx.sessionManager as never,
+        ui: ctx.ui as never,
+        mode: (ctx as { mode?: string }).mode,
+      });
+      for (const problem of problems) {
+        console.warn(`[pi-subagents] compatibility warning: ${problem}`);
+        try {
+          ctx.ui?.notify?.(`[pi-subagents] ${problem}`, "warning");
+        } catch { /* notify is best-effort here */ }
+      }
+    } catch { /* the guard itself must never break startup */ }
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
