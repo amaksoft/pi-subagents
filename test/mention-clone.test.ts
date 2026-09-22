@@ -399,3 +399,40 @@ describe("when the clone cannot deliver", () => {
     expect(session.dispose).toHaveBeenCalled();
   });
 });
+
+describe("setCloneSystemPrompt across pi versions", () => {
+  it("assigns the mutable field on old cores (byte-identical behavior)", async () => {
+    const { setCloneSystemPrompt } = await import("../src/mention-clone.js");
+    const state: { systemPrompt?: string; messages: { role: string; content?: unknown }[] } = {
+      systemPrompt: "rebuilt",
+      messages: [],
+    };
+    setCloneSystemPrompt({ agent: { state } }, "live prompt");
+    expect(state.systemPrompt).toBe("live prompt");
+    expect(state.messages).toEqual([]);
+  });
+
+  it("prepends a system message on getter-only state (0.86+)", async () => {
+    const { setCloneSystemPrompt } = await import("../src/mention-clone.js");
+    const messages: { role: string; content?: unknown }[] = [{ role: "user", content: "hi" }];
+    const state = {
+      messages,
+      get systemPrompt() {
+        return messages
+          .filter(m => m.role === "system")
+          .map(m => String(m.content ?? ""))
+          .join("\n");
+      },
+    };
+    // Assignment throws (modules are strict — the ESM production shape) —
+    // the helper must fall back instead of propagating.
+    expect(() => {
+      (state as { systemPrompt?: string }).systemPrompt = "x";
+    }).toThrow();
+    setCloneSystemPrompt({ agent: { state } } as never, "live prompt");
+    expect(messages[0]).toMatchObject({ role: "system", content: "live prompt" });
+    expect(messages).toHaveLength(2);
+    // And the replay reads it back: the clone reasons under live instructions.
+    expect(state.systemPrompt).toContain("live prompt");
+  });
+});

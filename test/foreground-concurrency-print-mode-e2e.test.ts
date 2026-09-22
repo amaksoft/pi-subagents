@@ -26,6 +26,7 @@ import {
   agentToolResults,
   type PrintModeRun,
   runPrintMode,
+  sessionToolNames,
 } from "./helpers/print-mode-runner.js";
 
 // Real pi-mono: loader, dynamic extension import, three live sessions.
@@ -72,7 +73,7 @@ describe.skipIf(LIVE)("maxConcurrentForeground e2e (real pi agent loop)", () => 
       cwd: projectDir(settings),
       live: false, // scripted on purpose: a real model may not emit both calls
       respond: async (context: Context) => {
-        const isParent = (context.tools ?? []).some(t => t.name === "Agent");
+        const isParent = sessionToolNames(context).includes("Agent");
         if (isParent) {
           const alreadySpawned = context.messages.some(
             m => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",

@@ -25,6 +25,7 @@ import {
   type FauxResponder,
   type PrintModeRun,
   runPrintMode,
+  sessionToolNames,
 } from "./helpers/print-mode-runner.js";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -47,7 +48,7 @@ function userPrompt(ctx: Context): string {
 }
 
 function tools(ctx: Context): string[] {
-  return (ctx.tools ?? []).map((tool) => tool.name);
+  return sessionToolNames(ctx);
 }
 
 function toolResults(ctx: Context, name: string): string[] {

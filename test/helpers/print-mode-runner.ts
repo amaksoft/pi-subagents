@@ -196,6 +196,38 @@ function resolveReply(
 }
 
 /**
+ * Effective system prompt for the calling session, across pi versions. ≤0.85
+ * carries it on `context.systemPrompt`; 0.86+ replays it from transcript
+ * system messages (see sessionToolNames). Legacy first, transcript second.
+ */
+export function transcriptSystemPrompt(context: {
+  systemPrompt?: string;
+  messages?: { role?: string; content?: unknown }[];
+}): string {
+  if (typeof context.systemPrompt === "string" && context.systemPrompt) return context.systemPrompt;
+  const parts: string[] = [];
+  const pushText = (c: unknown) => {
+    if (typeof c === "string") parts.push(c);
+    else if (Array.isArray(c)) {
+      for (const b of c) {
+        const t = (b as { text?: string })?.text ?? (b as { content?: string })?.content;
+        if (typeof t === "string") parts.push(t);
+      }
+    }
+  };
+  for (const m of context.messages ?? []) {
+    if (m?.role !== "system") continue;
+    const msg = m as { content?: unknown; sections?: Record<string, unknown> };
+    pushText(msg.content);
+    // Custom agent frontmatter bodies travel as named sections.
+    if (msg.sections && typeof msg.sections === "object") {
+      for (const v of Object.values(msg.sections)) pushText(v);
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
  * The common single-spawn flow as a responder. Routes by inspecting the calling
  * session's own context:
  *   - PARENT  (its tool set includes `Agent`):
@@ -204,13 +236,39 @@ function resolveReply(
  *   - SUBAGENT (no `Agent` tool): `subagent`.
  * Each route may be a value or a `(ctx) => value` function.
  */
+/**
+ * Tool names offered to the calling session, across pi versions. ≤0.85
+ * carries them on `context.tools`; 0.86+ moved declarations into transcript
+ * system messages (`TranscriptContext` has no `tools` key — the loop replays
+ * declarations from `toolsAdded`). Legacy first so old cores behave
+ * byte-identically (see the `compat-floor-pi` job).
+ */
+export function sessionToolNames(context: {
+  tools?: { name?: string }[];
+  messages?: { role?: string; toolsAdded?: unknown }[];
+}): string[] {
+  const legacy = (context.tools ?? []).map(t => t?.name).filter((n): n is string => !!n);
+  if (legacy.length > 0) return legacy;
+  const names: string[] = [];
+  for (const m of context.messages ?? []) {
+    if (m?.role !== "system") continue;
+    const tools = (m as { toolsAdded?: unknown }).toolsAdded;
+    if (!Array.isArray(tools)) continue;
+    for (const t of tools) {
+      const name = typeof t === "string" ? t : (t as { name?: string })?.name;
+      if (name && !names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
 export function routeBySession(routes: {
   parentInitial: FauxReply | ((ctx: Context) => FauxReply);
   parentFinal?: FauxReply | ((ctx: Context) => FauxReply);
   subagent: FauxReply | ((ctx: Context) => FauxReply);
 }): FauxResponder {
   return (context) => {
-    const isParent = (context.tools ?? []).some((t) => t.name === "Agent");
+    const isParent = sessionToolNames(context).includes("Agent");
     if (!isParent) return resolveReply(routes.subagent, context);
     const spawned = context.messages.some(
       (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",

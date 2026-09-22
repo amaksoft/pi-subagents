@@ -92,6 +92,38 @@ export interface MentionCloneResult {
   error?: string;
 }
 
+/** Minimal session shape this needs (structural, for tests). */
+export interface CloneSessionLike {
+  agent: {
+    state: {
+      systemPrompt?: string;
+      messages: { role: string; content?: unknown }[];
+    };
+  };
+}
+
+/**
+ * Copy the live system prompt into a forked session, across pi versions.
+ *
+ * ≤0.85 holds it as a plain mutable field; 0.86 replays it from the
+ * transcript and exposes it read-only (assigning throws in strict-mode
+ * ESM — which is what killed `@handle` model-mode mentions on upgrade).
+ * Try the assignment first so old cores behave byte-identically, and fall
+ * back to prepending a system message, which is the documented 0.86+ path
+ * ("content adds instructions") and inert on cores that ignore the role.
+ * Pure apart from the two writes; tested against both state shapes.
+ */
+export function setCloneSystemPrompt(session: CloneSessionLike, systemPrompt: string): void {
+  const state = session.agent.state;
+  try {
+    (state as { systemPrompt?: string }).systemPrompt = systemPrompt;
+    return;
+  } catch {
+    // Getter-only state (0.86+): fall through to the transcript path.
+  }
+  state.messages.unshift({ role: "system", content: systemPrompt });
+}
+
 /**
  * Fork the conversation, let the copy make the tool call, throw the copy away.
  * Never rejects: a clone that cannot run is reported so the caller can fall
@@ -175,7 +207,7 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
     // real thing, so the copy reasons under the instructions the user's model
     // is actually working under.
     const systemPrompt = ctx.getSystemPrompt?.();
-    if (systemPrompt) session.agent.state.systemPrompt = systemPrompt;
+    if (systemPrompt) setCloneSystemPrompt(session, systemPrompt);
 
     // The conversation itself. Pushed rather than assigned so the array the
     // session was built around stays the one it goes on using.

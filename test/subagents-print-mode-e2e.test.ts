@@ -26,6 +26,8 @@ import {
   type PrintModeRun,
   routeBySession,
   runPrintMode,
+  sessionToolNames,
+  transcriptSystemPrompt,
 } from "./helpers/print-mode-runner.js";
 
 // Real pi-mono (loader + dynamic extension import + two live sessions) — a cold
@@ -129,7 +131,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     //     finishes → the child's own model turn actually runs (≥3 calls).
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const respond = async (ctx: Context) => {
-      const isParent = (ctx.tools ?? []).some((t) => t.name === "Agent");
+      const isParent = sessionToolNames(ctx).includes("Agent");
       if (!isParent) {
         await sleep(80); // child takes long enough that a non-held parent exits first
         return "CHILD_BG_RAN";
@@ -188,7 +190,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
         parentFinal: "Reported.",
         // The child reflects whether the frontmatter body reached its own prompt.
         subagent: (ctx: Context) =>
-          `child saw: ${ctx.systemPrompt?.includes(MARKER) ? MARKER : "MISSING"}`,
+          `child saw: ${transcriptSystemPrompt(ctx).includes(MARKER) ? MARKER : "MISSING"}`,
       }),
     });
 
@@ -222,7 +224,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
         }),
         parentFinal: "Reported.",
         subagent: (ctx: Context) =>
-          `child saw: ${ctx.systemPrompt?.includes(MARKER) ? MARKER : "MISSING"}`,
+          `child saw: ${transcriptSystemPrompt(ctx).includes(MARKER) ? MARKER : "MISSING"}`,
       }),
     });
 
