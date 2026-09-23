@@ -47,10 +47,16 @@ export function setSystemPromptText(state: PromptStateLike, systemPrompt: string
 /** Structural surface checkCoreContract inspects (no pi imports). */
 export interface CoreContractInput {
   sessionManager?: {
-    list?: unknown;
-    listAll?: unknown;
     getSessionDir?: unknown;
     getSessionId?: unknown;
+  } | null;
+  /**
+   * The SessionManager class itself (listing is static: SessionManager.list
+   * / .listAll — NOT instance methods, which is what a naive probe checks).
+   */
+  sessionList?: {
+    list?: unknown;
+    listAll?: unknown;
   } | null;
   ui?: {
     custom?: unknown;
@@ -69,10 +75,11 @@ export interface CoreContractInput {
 export function checkCoreContract(input: CoreContractInput): string[] {
   const warnings: string[] = [];
   const sm = input.sessionManager;
-  if (typeof sm?.list !== "function") {
+  const sl = input.sessionList;
+  if (typeof sl?.list !== "function") {
     warnings.push("SessionManager.list is missing — session listing (/resume-filtered) cannot work.");
   }
-  if (typeof sm?.listAll !== "function") {
+  if (typeof sl?.listAll !== "function") {
     warnings.push("SessionManager.listAll is missing — all-folder listing (/resume-filtered all) cannot work.");
   }
   if (typeof sm?.getSessionDir !== "function") {

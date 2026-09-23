@@ -12,10 +12,12 @@ import { checkCoreContract, setSystemPromptText } from "../src/compat.js";
 
 const fullSurface = () => ({
   sessionManager: {
-    list: () => {},
-    listAll: () => {},
     getSessionDir: () => {},
     getSessionId: () => {},
+  },
+  sessionList: {
+    list: () => {},
+    listAll: () => {},
   },
   ui: {
     custom: () => {},
@@ -32,23 +34,40 @@ describe("checkCoreContract", () => {
 
   it("names each missing piece", () => {
     const warnings = checkCoreContract({
-      sessionManager: { list: () => {} },
+      sessionManager: { getSessionId: () => {} },
+      sessionList: { list: () => {} },
       ui: {},
       mode: "tui",
     });
     const text = warnings.join("\n");
     expect(text).toContain("listAll");
     expect(text).toContain("getSessionDir");
-    expect(text).toContain("getSessionId");
     expect(text).toContain("ui.custom");
     expect(text).toContain("ui.select");
-    // list itself is present: no complaint about it.
+    // Present surface stays silent.
     expect(text).not.toContain("SessionManager.list is missing");
+    expect(text).not.toContain("getSessionId is missing");
+  });
+
+  it("checks listing on the class, not the instance (list is static)", () => {
+    // Instance-shaped object with list on it must NOT satisfy the probe:
+    // the real contract is SessionManager.list, a static.
+    const warnings = checkCoreContract({
+      ...fullSurface(),
+      sessionList: {},
+    });
+    expect(warnings.join("\n")).toContain("SessionManager.list is missing");
   });
 
   it("skips UI checks outside tui mode (print/rpc stub it)", () => {
+    const full = fullSurface();
     expect(
-      checkCoreContract({ sessionManager: fullSurface().sessionManager, ui: {}, mode: "print" }),
+      checkCoreContract({
+        sessionManager: full.sessionManager,
+        sessionList: full.sessionList,
+        ui: {},
+        mode: "print",
+      }),
     ).toEqual([]);
   });
 
@@ -93,8 +112,9 @@ describe("session_start contract guard (wired)", () => {
       ui: { notify: (m: string) => { notified.push(m); }, addAutocompleteProvider: vitest.fn() },
       cwd: "/tmp",
       modelRegistry: { find: vitest.fn(), getAvailable: vitest.fn(() => []) },
-      // Degraded host: session listing present, everything else gone.
-      sessionManager: { list: async () => [], getSessionId: () => "s1" },
+      // Degraded host: static listing present, everything else gone.
+      sessionManager: { getSessionId: () => "s1" },
+      sessionList: { list: async () => [] } as any,
       getSystemPrompt: vitest.fn(() => ""),
     };
     const warn = console.warn;
@@ -105,10 +125,14 @@ describe("session_start contract guard (wired)", () => {
       console.warn = warn;
     }
     const all = [...warned, ...notified].join("\n");
-    expect(all).toContain("listAll");
+    // Instance + UI sides degrade through the mock. The static side
+    // (SessionManager.list/listAll) always uses the real imported class
+    // here, so it stays silent — its absence is covered by the unit tests.
     expect(all).toContain("getSessionDir");
     expect(all).toContain("ui.custom");
     // Present surface stays silent.
     expect(all).not.toContain("SessionManager.list is missing");
+    expect(all).not.toContain("listAll is missing");
+    expect(all).not.toContain("getSessionId is missing");
   });
 });
