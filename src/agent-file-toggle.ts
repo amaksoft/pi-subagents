@@ -178,6 +178,53 @@ export function enableInContent(content: string): { content: string; changed: bo
   return { content: kept.join(""), changed: true };
 }
 
+/**
+ * Set (or, with undefined, remove) a scalar frontmatter key, line-wise.
+ *
+ * Same contract as the enable/disable edits: everything untouched is
+ * byte-preserved (comments, key order, quoting, line endings); the key is
+ * replaced wherever it sits in the block, appended after line 1 when absent
+ * (mirroring disableInContent's insert position), and removal reports
+ * `changed: false` when there was nothing to remove. `undefined` means
+ * "inherit" for model/thinking — the field's absence IS the setting.
+ */
+function setScalarKey(
+  content: string,
+  key: "model" | "thinking",
+  value: string | undefined,
+): { content: string; changed: boolean } {
+  const block = splitFrontmatter(content);
+  if (!block) return { content, changed: false };
+  const pattern = new RegExp(`^${key}:`);
+  const lines = [...block.lines];
+  let found = -1;
+  for (let i = 1; i < block.closeIdx; i++) {
+    if (pattern.test(lines[i].replace(/\r?\n$/, ""))) {
+      found = i;
+      break;
+    }
+  }
+  if (value === undefined) {
+    if (found === -1) return { content, changed: false };
+    lines.splice(found, 1);
+    return { content: lines.join(""), changed: true };
+  }
+  const line = `${key}: ${value}${block.eol}`;
+  if (found === -1) lines.splice(1, 0, line);
+  else lines[found] = line;
+  return { content: lines.join(""), changed: true };
+}
+
+/** Set or clear the agent file's `model:` line (`undefined` removes = inherit). */
+export function setModelInContent(content: string, model: string | undefined): { content: string; changed: boolean } {
+  return setScalarKey(content, "model", model);
+}
+
+/** Set or clear the agent file's `thinking:` line (`undefined` removes = inherit). */
+export function setThinkingInContent(content: string, thinking: string | undefined): { content: string; changed: boolean } {
+  return setScalarKey(content, "thinking", thinking);
+}
+
 /** Is this the empty stub `/agents` writes when disabling a built-in default? */
 export function isEmptyStub(content: string): boolean {
   return content.replace(/\r\n/g, "\n").trim() === "---\n---";

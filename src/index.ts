@@ -18,7 +18,7 @@ import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Tex
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
-import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
+import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile, setModelInContent, setThinkingInContent } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent, topLevelStopRefusal } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
@@ -3632,21 +3632,25 @@ Terse command-style prompts produce shallow, generic work.
     const isDefault = cfg.isDefault === true;
     const disabled = cfg.enabled === false;
 
+    // Model/thinking pickers need a file to write: defaults without one
+    // eject first (same rule as Edit).
+    const modelLabel = `Model (current: ${getModelLabel(name, ctx.modelRegistry)})`;
+    const thinkingLabel = `Thinking (current: ${cfg.thinking ?? "inherit"})`;
     let menuOptions: string[];
     if (disabled && file) {
       // Disabled agent with a file — offer Enable
       menuOptions = isDefault
-        ? ["Enable", "Edit", "Reset to default", "Delete", "Back"]
-        : ["Enable", "Edit", "Delete", "Back"];
+        ? ["Enable", "Edit", modelLabel, thinkingLabel, "Reset to default", "Delete", "Back"]
+        : ["Enable", "Edit", modelLabel, thinkingLabel, "Delete", "Back"];
     } else if (isDefault && !file) {
       // Default agent with no .md override
       menuOptions = ["Eject (export as .md)", "Disable", "Back"];
     } else if (isDefault && file) {
       // Default agent with .md override (ejected)
-      menuOptions = ["Edit", "Disable", "Reset to default", "Delete", "Back"];
+      menuOptions = ["Edit", modelLabel, thinkingLabel, "Disable", "Reset to default", "Delete", "Back"];
     } else {
       // User-defined agent
-      menuOptions = ["Edit", "Disable", "Delete", "Back"];
+      menuOptions = ["Edit", modelLabel, thinkingLabel, "Disable", "Delete", "Back"];
     }
 
     const choice = await ctx.ui.select(name, menuOptions);
@@ -3683,7 +3687,62 @@ Terse command-style prompts produce shallow, generic work.
       await disableAgent(ctx, name);
     } else if (choice === "Enable") {
       await enableAgent(ctx, name);
+    } else if (choice === modelLabel && file) {
+      await chooseAgentModel(ctx, name, file.path);
+    } else if (choice === thinkingLabel && file) {
+      await chooseAgentThinking(ctx, name, file.path);
     }
+  }
+
+  /** Model picker for one agent file: live registry first, inherit, custom. */
+  async function chooseAgentModel(ctx: ExtensionContext, name: string, path: string) {
+    const registry = ctx.modelRegistry as unknown as { getAvailable?: () => { provider: string; id: string }[] } | undefined;
+    const available = registry?.getAvailable?.() ?? [];
+    const seen = new Set<string>();
+    const options = ["inherit (parent model)"];
+    for (const m of available) {
+      const full = `${m.provider}/${m.id}`;
+      if (seen.has(full)) continue;
+      seen.add(full);
+      options.push(full);
+    }
+    options.push("custom...");
+    const picked = await ctx.ui.select(`Model for ${name}`, options);
+    if (!picked) return;
+    let model: string | undefined;
+    if (picked === "custom...") {
+      model = (await ctx.ui.input("Model (provider/modelId)")) || undefined;
+      if (!model) return;
+    } else if (picked !== options[0]) {
+      model = picked;
+    }
+    const { writeFileSync } = await import("node:fs");
+    const { content, changed } = setModelInContent(readFileSync(path, "utf-8"), model);
+    if (!changed) {
+      ctx.ui.notify(model ? `Model already ${model}.` : "Model already inherits.", "info");
+      return;
+    }
+    writeFileSync(path, content, "utf-8");
+    reloadCustomAgents();
+    ctx.ui.notify(model ? `Model for ${name}: ${model}.` : `Model for ${name} inherits the parent.`, "info");
+  }
+
+  /** Thinking picker for one agent file: inherit or a pi level. */
+  async function chooseAgentThinking(ctx: ExtensionContext, name: string, path: string) {
+    // "inherit" is a UI-only pseudo-choice (removes the field); the rest
+    // mirror pi — same list the create wizard offers.
+    const picked = await ctx.ui.select(`Thinking for ${name}`, ["inherit", ...THINKING_LEVELS]);
+    if (!picked) return;
+    const thinking = picked === "inherit" ? undefined : picked;
+    const { writeFileSync } = await import("node:fs");
+    const { content, changed } = setThinkingInContent(readFileSync(path, "utf-8"), thinking);
+    if (!changed) {
+      ctx.ui.notify(thinking ? `Thinking already ${thinking}.` : "Thinking already inherits.", "info");
+      return;
+    }
+    writeFileSync(path, content, "utf-8");
+    reloadCustomAgents();
+    ctx.ui.notify(thinking ? `Thinking for ${name}: ${thinking}.` : `Thinking for ${name} inherits.`, "info");
   }
 
   /** Eject a default agent: write its embedded config as a .md file. */
@@ -3917,22 +3976,27 @@ Write the file using the write tool. Only write the file, nothing else.`;
       tools = customTools;
     }
 
-    // 4. Model
-    const modelChoice = await ctx.ui.select("Model", [
-      "inherit (parent model)",
-      "haiku",
-      "sonnet",
-      "opus",
-      "custom...",
-    ]);
+    // 4. Model — live registry (pins rot: the haiku/sonnet/opus literals
+    // this replaced died with the models they named), inherit, custom.
+    const wizardRegistry = ctx.modelRegistry as unknown as { getAvailable?: () => { provider: string; id: string }[] } | undefined;
+    const wizardModels = wizardRegistry?.getAvailable?.() ?? [];
+    const wizardSeen = new Set<string>();
+    const modelOptions = ["inherit (parent model)"];
+    for (const m of wizardModels) {
+      const full = `${m.provider}/${m.id}`;
+      if (wizardSeen.has(full)) continue;
+      wizardSeen.add(full);
+      modelOptions.push(full);
+    }
+    modelOptions.push("custom...");
+    const modelChoice = await ctx.ui.select("Model", modelOptions);
     if (!modelChoice) return;
 
     let model: string | undefined;
-    if (modelChoice === "haiku") model = "anthropic/claude-haiku-4-5";
-    else if (modelChoice === "sonnet") model = "anthropic/claude-sonnet-4-6";
-    else if (modelChoice === "opus") model = "anthropic/claude-opus-4-6";
-    else if (modelChoice === "custom...") {
+    if (modelChoice === "custom...") {
       model = (await ctx.ui.input("Model (provider/modelId)")) || undefined;
+    } else if (modelChoice !== modelOptions[0]) {
+      model = modelChoice;
     }
 
     // 5. Thinking

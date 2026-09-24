@@ -21,6 +21,8 @@ import {
   isDisabledContent,
   isEmptyStub,
   locateAgentFile,
+  setModelInContent,
+  setThinkingInContent,
 } from "../src/agent-file-toggle.js";
 import { parseAgentFrontmatter } from "../src/custom-agents.js";
 
@@ -417,5 +419,40 @@ describe("buildNewAgentFile", () => {
   it("keeps the system prompt as the body", () => {
     const content = buildNewAgentFile({ ...base, systemPrompt: "Line 1.\n\nLine 2." });
     expect(parseFrontmatter<Record<string, unknown>>(content).body).toBe("Line 1.\n\nLine 2.");
+  });
+});
+
+describe("setModelInContent / setThinkingInContent", () => {
+  const FILE = `---\ndescription: Scout\ntools: read, bash\n---\n\nBody.\n`;
+
+  it("inserts the key and the loader honors it", () => {
+    const { content, changed } = setModelInContent(FILE, "anthropic/claude-sonnet-4-6");
+    expect(changed).toBe(true);
+    expect(content).toContain("model: anthropic/claude-sonnet-4-6");
+    expect(content).toContain("Body.");
+    const fm = parseAgentFrontmatter(content).frontmatter as Record<string, unknown>;
+    expect(fm.model).toBe("anthropic/claude-sonnet-4-6");
+  });
+
+  it("replaces in place, preserving everything else", () => {
+    const withThinking = `---\ndescription: Scout\nthinking: low\ntools: read\n---\n\nBody.\n`;
+    const { content, changed } = setThinkingInContent(withThinking, "max");
+    expect(changed).toBe(true);
+    expect(content).toContain("thinking: max");
+    expect(content).not.toContain("thinking: low");
+    expect(content).toContain("tools: read");
+  });
+
+  it("removes the key for inherit, reporting no-op when absent", () => {
+    expect(setModelInContent(FILE, undefined)).toEqual({ content: FILE, changed: false });
+    const withModel = setModelInContent(FILE, "x/y").content;
+    const removed = setModelInContent(withModel, undefined);
+    expect(removed.changed).toBe(true);
+    expect(removed.content).toBe(FILE);
+    expect(setThinkingInContent(FILE, undefined).changed).toBe(false);
+  });
+
+  it("refuses files without frontmatter", () => {
+    expect(setModelInContent("no frontmatter\n", "x/y").changed).toBe(false);
   });
 });
