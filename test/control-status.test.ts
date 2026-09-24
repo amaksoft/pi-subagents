@@ -12,7 +12,7 @@
  * exact straggler and the exact next action.
  */
 import { describe, expect, it } from "vitest";
-import { renderRunStatus } from "../src/workflow/control.js";
+import { renderAgentInspect, renderRunStatus } from "../src/workflow/control.js";
 import type { WorkflowEntry } from "../src/workflow/progress.js";
 
 const NOW = 1_790_244_971_459;
@@ -134,5 +134,55 @@ describe("renderRunStatus (wf_0435 replay)", () => {
     );
     expect(out.split("\n")[0]).toContain("40/40 agents settled");
     expect(out).not.toContain("BARRIER HELD");
+  });
+});
+
+describe("renderAgentInspect (judge's brief)", () => {
+  const wedgedEntry = {
+    type: "workflow_agent",
+    index: 18,
+    label: "verify",
+    state: "start",
+    agentId: "wf-agent-18",
+    recordId: "rec-18",
+    queuedAt: NOW - 21 * HOUR,
+    startedAt: NOW - 21 * HOUR,
+    lastProgressAt: NOW - 21 * HOUR,
+  } as any;
+
+  it("lays out stall, tool elapsed, ages and tail for a wedged agent", () => {
+    const record = {
+      ...wedgedRecord,
+      toolUses: 3,
+      stalledSince: NOW - 20 * HOUR,
+      liveOutput: "$ curl https://example.com/big.tar.gz\n",
+    } as any;
+    const out = renderAgentInspect(wedgedEntry, record, 10 * 60_000, NOW);
+    expect(out).toContain("#18 verify");
+    expect(out).toContain("stalled");
+    expect(out).toContain("bash");
+    expect(out).toContain("tool uses: 3");
+    expect(out).toContain("curl");
+  });
+
+  it("says parked, not wedged, for a never-spawned agent", () => {
+    const out = renderAgentInspect(
+      { ...wedgedEntry, recordId: undefined, startedAt: undefined } as any,
+      undefined,
+      10 * 60_000,
+      NOW,
+    );
+    expect(out).toContain("parked behind the run's concurrency limit");
+    expect(out).not.toContain("stalled");
+  });
+
+  it("reports a settled agent from the journal alone", () => {
+    const out = renderAgentInspect(
+      { ...wedgedEntry, state: "done", resultPreview: '{"isReal":true}' } as any,
+      undefined,
+      10 * 60_000,
+      NOW,
+    );
+    expect(out).toContain('{"isReal":true}');
   });
 });

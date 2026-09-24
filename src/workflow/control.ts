@@ -133,3 +133,54 @@ export function renderRunStatus(
       .join("\n")
   );
 }
+
+/**
+ * Evidence brief for one workflow agent: the judge's instrument for ruling on
+ * a straggler. Composes everything the manager record knows (stall, current
+ * tool + elapsed, activity/output ages, live tail) with the entry's own state,
+ * so `inspect` answers "is it working or wedged" without the session having
+ * to guess from a one-line status row. Pure apart from the single record read
+ * the caller performs; settled and never-spawned agents render honestly too.
+ */
+export function renderAgentInspect(
+  entry: import("./progress.js").WorkflowAgentEntry,
+  record: AgentRecord | undefined,
+  thresholdMs: number,
+  now = Date.now(),
+): string {
+  const lines = [`#${entry.index} ${entry.label} · ${entry.state}`];
+  if (entry.attempt !== undefined && entry.attempt > 1) lines[0] += ` · attempt ${entry.attempt}`;
+  if (entry.model) lines[0] += ` · ${entry.model}`;
+  if (entry.state === "done" || (entry.state === "error" && (entry.skipped || entry.error))) {
+    if (entry.error) lines.push(`error: ${entry.error.slice(0, 500)}`);
+    else if (entry.resultPreview) lines.push(`output: ${entry.resultPreview.slice(0, 2000)}`);
+    else lines.push("settled with no recorded output.");
+    return lines.join("\n");
+  }
+  if (!record) {
+    if (entry.startedAt == null && entry.queuedAt != null) {
+      lines.push(`parked behind the run's concurrency limit for ${formatStallAge(Math.max(0, now - entry.queuedAt))} — never spawned, nothing to diagnose.`);
+    } else {
+      lines.push("no manager record (spawned before this session, or swept) — only the journal preview survives.");
+      if (entry.resultPreview) lines.push(`preview: ${entry.resultPreview.slice(0, 500)}`);
+    }
+    return lines.join("\n");
+  }
+  const stall = describeStall(record, now, thresholdMs);
+  lines.push(stall ?? `not stalled — last activity ${formatStallAge(Math.max(0, now - record.lastActivityAt))} ago.`);
+  if (record.currentTool) {
+    lines.push(
+      `in ${record.currentTool.name} for ${formatStallAge(Math.max(0, now - record.currentTool.startedAt))}` +
+        (record.lastOutputAt !== undefined
+          ? ` · last output ${formatStallAge(Math.max(0, now - record.lastOutputAt))} ago`
+          : " · no output yet"),
+    );
+  } else if (record.reasoningSince !== undefined) {
+    lines.push(`reasoning for ${formatStallAge(Math.max(0, now - record.reasoningSince))} (no tool running).`);
+  } else {
+    lines.push("between tools, idle.");
+  }
+  lines.push(`tool uses: ${record.toolUses} · stalled-since flag: ${record.stalledSince !== undefined ? formatStallAge(Math.max(0, now - record.stalledSince)) : "not flagged"}.`);
+  if (record.liveOutput) lines.push(`live tail:\n${record.liveOutput.slice(-2000)}`);
+  return lines.join("\n");
+}

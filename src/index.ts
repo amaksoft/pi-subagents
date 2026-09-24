@@ -34,7 +34,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { renderRunStatus, resolveWorkflowAgent } from "./workflow/control.js";
+import { renderAgentInspect, renderRunStatus, resolveWorkflowAgent } from "./workflow/control.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, GRACE_TURNS_CEILING, loadSettings, MAX_CONCURRENT_CEILING, MAX_TURNS_CEILING, SUBAGENT_DEPTH_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -70,7 +70,7 @@ import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "
 import { createWorkflowHost } from "./workflow/host.js";
 import { appendJournal, readJournal, type WorkflowJournalEntry } from "./workflow/journal.js";
 import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/meta.js";
-import { elapsedMs } from "./workflow/progress.js";
+import { collapse, elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
 import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveEvictedResume, resolveResumeTarget, selectSettledEvictions, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
@@ -3171,6 +3171,7 @@ Terse command-style prompts produce shallow, generic work.
     label: "Workflow Control",
     description:
       "Inspect and intervene in this session's SubagentWorkflow runs. `status` lists runs (omit runId) or one run's agents with stall diagnoses; " +
+      "`inspect` returns the evidence brief for one agent (stall, current tool + elapsed, activity ages, live output tail) so you can judge working vs wedged before acting; " +
       "`stop_agent` skips one (its barrier call resolves null like terminal failure, siblings proceed); " +
       "`retry_agent` respawns one (optional narrowed `prompt` replaces its instructions for that attempt, journaled distinctly); " +
       "`stop_run` kills the whole run. Address agents by `label` (exact, then case-insensitive) or numeric `index` — ambiguity errors list candidates. " +
@@ -3178,7 +3179,7 @@ Terse command-style prompts produce shallow, generic work.
     promptSnippet: "Inspect or intervene in a workflow run's agents",
     parameters: Type.Object({
       action: Type.Union(
-        [Type.Literal("status"), Type.Literal("stop_agent"), Type.Literal("retry_agent"), Type.Literal("stop_run")],
+        [Type.Literal("status"), Type.Literal("inspect"), Type.Literal("stop_agent"), Type.Literal("retry_agent"), Type.Literal("stop_run")],
         { description: "What to do." },
       ),
       runId: Type.Optional(Type.String({ description: "Workflow run id (wf_…). Omit with status to list runs." })),
@@ -3254,6 +3255,14 @@ Terse command-style prompts produce shallow, generic work.
         .filter(e => (seen.has(e.index) ? false : (seen.add(e.index), true)));
       const resolved = resolveWorkflowAgent(entries, { label: params.label, index: params.index });
       if (!resolved.ok) return textResult(resolved.message);
+      if (action === "inspect") {
+        const { agents } = collapse(task.workflowProgress);
+        const entry = agents.find(a => a.index === resolved.index);
+        if (!entry) return textResult(`Agent #${resolved.index} in run ${task.id} has no journal entry — nothing to inspect.`);
+        return textResult(
+          renderAgentInspect(entry, entry.recordId ? manager.getRecord(entry.recordId) : undefined, manager.getStallThresholdMs()),
+        );
+      }
       if (!task.control) {
         return textResult(`Run ${task.id} is ${task.status} — its agents can no longer be reached. Resume it to act.`);
       }
