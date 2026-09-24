@@ -34,6 +34,7 @@ import {
 } from "./domain/queue.js";
 import { DEFAULT_STALL_THRESHOLD_MS, isStalled, isStoppableStatus, pushLiveOutput, touchActivity, touchOutput, trackToolActivity } from "./status-note.js";
 import { TEAMMATE_INBOX_CAP, type TeammateManager } from "./teammate-tools.js";
+import { TeamTaskStore } from "./team-tasks.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
@@ -367,6 +368,14 @@ async function shutdownChildSession(session: AgentSession | undefined): Promise<
 
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
+  /**
+   * Session-team task stores, keyed by main-session id (the implicit team).
+   * One manager serves one root session in practice; the map covers
+   * same-process sibling activations (child sessions re-activate the
+   * extension — see the registry comment in index.ts). Bare contexts with
+   * no session id share the `"inmemory"` store.
+   */
+  private teamStores = new Map<string, TeamTaskStore>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -867,6 +876,12 @@ export class AgentManager {
               manager: this,
               senderLabel: `@${record.alias ?? record.handle ?? record.id}`,
               selfId: record.id,
+            },
+            // Same implicit-team scope as the mailbox: the main session's
+            // list, even when the child works in a worktree or foreign cwd.
+            teamTasks: {
+              store: this.teamTasksFor(ctx.cwd, ctx.sessionManager?.getSessionId?.()),
+              actorLabel: `@${record.alias ?? record.handle ?? record.id}`,
             },
           }
         : {}),
@@ -1665,6 +1680,21 @@ export class AgentManager {
   /** Top-level records: the implicit session team (see teammate-tools.ts). */
   listTeammates(): AgentRecord[] {
     return [...this.agents.values()].filter(isTopLevelAgent);
+  }
+
+  /**
+   * The session team's shared task list (see team-tasks.ts). Resolved from
+   * the spawning context: cwd + main-session id locate the snapshot file,
+   * so /resume reloads the same list. Cached per session id.
+   */
+  teamTasksFor(cwd: string, sessionId?: string): TeamTaskStore {
+    const key = sessionId ?? "inmemory";
+    let store = this.teamStores.get(key);
+    if (!store) {
+      store = new TeamTaskStore(cwd, sessionId);
+      this.teamStores.set(key, store);
+    }
+    return store;
   }
 
   /**

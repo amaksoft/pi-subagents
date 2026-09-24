@@ -37,8 +37,10 @@ function files(dir) {
 const failures = [];
 const rel = p => p.slice(ROOT.length + 1);
 
-// 1. Status writes live in owner modules only.
-const STATUS_OWNERS = new Set(["agent-manager.ts", "workflow/task.ts"]);
+// 1. Status writes live in owner modules only. team-tasks.ts owns
+// TeamTask.status the way agent-manager owns AgentRecord.status — a separate
+// lifecycle, not a new implicit transition on an existing one.
+const STATUS_OWNERS = new Set(["agent-manager.ts", "workflow/task.ts", "team-tasks.ts"]);
 for (const f of files(ROOT)) {
   const lines = readFileSync(f, "utf8").split("\n");
   lines.forEach((line, i) => {

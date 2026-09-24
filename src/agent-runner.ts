@@ -25,6 +25,7 @@ import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { createTeammateTools, type TeammateManager } from "./teammate-tools.js";
+import { createTeamTasksTools, type TeamTaskStore } from "./team-tasks.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
@@ -47,6 +48,7 @@ export const SUBAGENT_TOOL_NAMES = {
   SNOOZE: "snooze_subagent",
   WORKFLOW_CONTROL: "workflow_control",
   MESSAGE: "message_teammate",
+  TEAM_TASKS: "team_tasks",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -538,6 +540,12 @@ export interface RunOptions {
    * sender. Nested/workflow children are not teammates — ownership boundary.
    */
   teammateMailbox?: { manager: TeammateManager; senderLabel: string; selfId: string };
+  /**
+   * Session-team task list for this run (same top-level scope as the
+   * mailbox): the child gets a `team_tasks` tool on the main session's
+   * store, acting under its own label.
+   */
+  teamTasks?: { store: TeamTaskStore; actorLabel: string };
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
   /**
@@ -1023,9 +1031,15 @@ export async function runAgent(
       })
     : [];
   const teammateToolNames = new Set(teammateTools.map(tool => tool.name));
+  // Same implicit-team scope as the mailbox; disallowed_tools opts out.
+  const teamTasksTools = options.teamTasks
+    ? createTeamTasksTools(options.teamTasks.store, options.teamTasks.actorLabel)
+    : [];
+  const teamTasksToolNames = new Set(teamTasksTools.map(tool => tool.name));
   const readmitToolNames = new Set([
     ...[...nestedToolNames].filter(name => !disallowedSet?.has(name)),
     ...[...teammateToolNames].filter(name => !disallowedSet?.has(name)),
+    ...[...teamTasksToolNames].filter(name => !disallowedSet?.has(name)),
     ...structuredToolNames,
   ]);
 
@@ -1083,6 +1097,7 @@ export async function runAgent(
       ),
       ...[...nestedToolNames].filter((t) => !disallowedSet?.has(t)),
       ...[...teammateToolNames].filter((t) => !disallowedSet?.has(t)),
+      ...[...teamTasksToolNames].filter((t) => !disallowedSet?.has(t)),
       // Not filtered through `disallowedSet`, unlike the nested tools above:
       // the caller asked for a schema, and removing the only tool that can
       // satisfy it would make the request unsatisfiable by construction rather
@@ -1093,7 +1108,9 @@ export async function runAgent(
     // Deny the orchestration tools EXCEPT the nested ones this agent opted into —
     // those are injected as customTools and must survive the registry gate.
     const denyTools = new Set<string>(
-      EXCLUDED_TOOL_NAMES.filter((t) => !nestedToolNames.has(t) && !teammateToolNames.has(t)),
+      EXCLUDED_TOOL_NAMES.filter(
+        (t) => !nestedToolNames.has(t) && !teammateToolNames.has(t) && !teamTasksToolNames.has(t),
+      ),
     );
     // Keep only the built-ins the agent asked for — deny the rest.
     for (const name of BUILTIN_TOOL_NAMES) {
@@ -1157,7 +1174,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
-    customTools: [...nestedTools, ...teammateTools, ...structuredTools],
+    customTools: [...nestedTools, ...teammateTools, ...teamTasksTools, ...structuredTools],
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {

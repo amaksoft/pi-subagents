@@ -2969,3 +2969,48 @@ describe("teammate mailbox wiring", () => {
     expect(customToolNames()).not.toContain("message_teammate");
   });
 });
+
+describe("team tasks wiring", () => {
+  function teamMocks() {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    const cfg = makeAgentConfig({ extensions: true });
+    vi.mocked(getAgentConfig).mockReset();
+    vi.mocked(getAgentConfig).mockImplementation(() => cfg);
+    vi.mocked(getToolNamesForType).mockReset();
+    vi.mocked(getToolNamesForType).mockImplementation(() => BUILTINS_7);
+    return () => {
+      vi.mocked(getAgentConfig).mockReset();
+      vi.mocked(getToolNamesForType).mockReset();
+    };
+  }
+
+  it("top-level runs get team_tasks alongside message_teammate", async () => {
+    const restore = teamMocks();
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    try {
+      await runAgent(ctx, "Explore", "go", {
+        pi,
+        teammateMailbox: { manager: {} as any, senderLabel: "@scout", selfId: "a1" },
+        teamTasks: { store: new (await import("../src/team-tasks.js")).TeamTaskStore(), actorLabel: "@scout" },
+      });
+    } finally {
+      restore();
+    }
+    expect(customToolNames()).toContain("team_tasks");
+    expect(customToolNames()).toContain("message_teammate");
+  });
+
+  it("runs without team scope get neither", async () => {
+    const restore = teamMocks();
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    try {
+      await runAgent(ctx, "Explore", "go", { pi });
+    } finally {
+      restore();
+    }
+    expect(customToolNames()).not.toContain("team_tasks");
+    expect(customToolNames()).not.toContain("message_teammate");
+  });
+});

@@ -40,6 +40,7 @@ import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, GRACE_TURNS_CEILING, loadSettings, MAX_CONCURRENT_CEILING, MAX_TURNS_CEILING, SUBAGENT_DEPTH_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { buildStallCheckin, describeStall, describeToolActivity, getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { runTeamTasksAction, TEAM_LEAD_LABEL, type TeamTasksParams } from "./team-tasks.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
   type AgentActivity,
@@ -3149,6 +3150,51 @@ Terse command-style prompts produce shallow, generic work.
           ? `Message delivered to ${record.handle ?? record.alias ?? record.id}. It arrives after their current tool execution.`
           : (delivery.reason ?? `Could not deliver to ${record.id}.`),
       );
+    },
+  }));
+
+  // ---- team_tasks tool ----
+
+  // Main-session closure: the lead acts as TEAM_LEAD_LABEL (may reassign).
+  // Sibling agents get their own closure (see agent-runner teamTasks).
+  registerToolReportingUsage(defineTool({
+    name: SUBAGENT_TOOL_NAMES.TEAM_TASKS,
+    label: "Team Tasks",
+    description:
+      "The session team's shared task list — create tasks, claim them, track status, declare dependencies. " +
+      "Decompose work here so teammates can claim and update without routing every step through you. " +
+      "As lead you may reassign; teammates negotiate peer-to-peer with message_teammate.",
+    promptSnippet: "Manage the team task list",
+    parameters: Type.Object({
+      action: Type.Union(
+        [
+          Type.Literal("create"),
+          Type.Literal("list"),
+          Type.Literal("get"),
+          Type.Literal("update"),
+          Type.Literal("delete"),
+        ],
+        { description: "What to do." },
+      ),
+      id: Type.Optional(Type.String({ description: "Task id (get/update/delete)." })),
+      title: Type.Optional(Type.String({ description: "Task title (create, update)." })),
+      details: Type.Optional(Type.String({ description: "Longer description (create, update)." })),
+      status: Type.Optional(
+        Type.Union([Type.Literal("pending"), Type.Literal("in-progress"), Type.Literal("completed")], {
+          description: "Filter (list) or new status (update).",
+        }),
+      ),
+      owner: Type.Optional(
+        Type.String({ description: "Claim by label, \"\" to release (update)." }),
+      ),
+      dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Dependency ids (create, update)." })),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      // Resolved per call, not per session: /resume swaps the session (and
+      // its list) under a live extension, so a cached store would serve the
+      // previous conversation's tasks after a switch.
+      const store = manager.teamTasksFor(ctx.cwd, ctx.sessionManager?.getSessionId?.());
+      return runTeamTasksAction(store, TEAM_LEAD_LABEL, params as TeamTasksParams);
     },
   }));
 
