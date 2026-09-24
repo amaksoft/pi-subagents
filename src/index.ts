@@ -34,7 +34,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { resolveWorkflowAgent } from "./workflow/control.js";
+import { renderRunStatus, resolveWorkflowAgent } from "./workflow/control.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, GRACE_TURNS_CEILING, loadSettings, MAX_CONCURRENT_CEILING, MAX_TURNS_CEILING, SUBAGENT_DEPTH_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -3219,31 +3219,21 @@ Terse command-style prompts produce shallow, generic work.
         );
       }
       if (action === "status") {
-        const agents = task.workflowProgress.filter(e => e.type === "workflow_agent") as {
-          index: number;
-          label: string;
-          state: string;
-          resultPreview?: string;
-          error?: string;
-          attempt?: number;
-          recordId?: string;
-        }[];
-        if (agents.length === 0) return textResult(`Run ${task.id} [${task.status}]: no agents yet.`);
-        const threshold = manager.getStallThresholdMs();
+        // Rendered by the pure control.renderRunStatus (same last-write-wins
+        // fold the dialog uses): showing raw history here once buried a
+        // 21-hour wedge under 160 stale "start" rows and the judging
+        // session read them as live agents.
         return textResult(
-          `Run ${task.id} [${task.status}] ${task.meta?.name ?? ""}\n` +
-          agents
-            .map(a => {
-              const rec = a.recordId ? manager.getRecord(a.recordId) : undefined;
-              const stall = rec ? describeStall(rec, Date.now(), threshold) : undefined;
-              const bits = [`#${a.index} ${a.label}`, a.state];
-              if (a.attempt !== undefined && a.attempt > 1) bits.push(`attempt ${a.attempt}`);
-              if (stall) bits.push(stall);
-              if (a.error) bits.push(`error: ${a.error.slice(0, 120)}`);
-              else if (a.resultPreview) bits.push(`output: ${a.resultPreview.slice(0, 120)}`);
-              return bits.join(" · ");
-            })
-            .join("\n"),
+          renderRunStatus(
+            {
+              id: task.id,
+              status: task.status,
+              name: task.meta?.name ?? "",
+              progress: task.workflowProgress,
+            },
+            id => manager.getRecord(id),
+            manager.getStallThresholdMs(),
+          ),
         );
       }
       if (action === "stop_run") {
@@ -3254,9 +3244,14 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(`Stopped workflow run ${task.id}. Partial results stand; resume from its journal to continue.`);
       }
       // stop_agent / retry_agent: resolve the address, then delegate.
+      // Deduped by index (same last-write-wins as status): the append-only log
+      // holds each agent several times, and stale twin rows otherwise read as
+      // ambiguity when addressing by label.
+      const seen = new Set<number>();
       const entries = task.workflowProgress
         .filter(e => e.type === "workflow_agent")
-        .map(e => ({ index: (e as { index: number }).index, label: (e as { label: string }).label }));
+        .map(e => ({ index: (e as { index: number }).index, label: (e as { label: string }).label }))
+        .filter(e => (seen.has(e.index) ? false : (seen.add(e.index), true)));
       const resolved = resolveWorkflowAgent(entries, { label: params.label, index: params.index });
       if (!resolved.ok) return textResult(resolved.message);
       if (!task.control) {

@@ -86,9 +86,13 @@ describe("setSystemPromptText delegation", () => {
   });
 });
 
+// Top-level so the full-extension boot cost stays out of the test timeout.
+// eslint-disable-next-line import/first
+import subagentsExtension from "../src/index.js";
+
 describe("session_start contract guard (wired)", () => {
-  it("warns once per missing API on a degraded host", async () => {
-    const { default: subagentsExtension } = await import("../src/index.js");
+  // Boots the whole extension: generous budget under parallel-worker load.
+  it("warns once per missing API on a degraded host", { timeout: 30_000 }, async () => {
     const { vi: vitest } = await import("vitest");
     const lifecycle = new Map<string, any>();
     const notified: string[] = [];

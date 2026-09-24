@@ -7,6 +7,9 @@
  * dialog uses (identical barrier/journal accounting, no new settle paths).
  * Pure and tested directly; index.ts wires manager + tasks around it.
  */
+import { describeStall, formatStallAge } from "../status-note.js";
+import type { AgentRecord } from "../types.js";
+import { collapse, displayState, isLive, type WorkflowEntry } from "./progress.js";
 
 export interface WorkflowAgentRef {
   label?: string;
@@ -55,4 +58,78 @@ export function resolveWorkflowAgent(
       ? `Ambiguous label "${label}" — say the index: ${pool.join("; ")}.`
       : `No workflow agent labeled "${label}". Known: ${pool.join("; ") || "(none)"}.`,
   };
+}
+
+export interface RunStatusInput {
+  id: string;
+  status: string;
+  name: string;
+  progress: readonly WorkflowEntry[];
+}
+
+/**
+ * Render one run's agent listing for `workflow_control status`.
+ *
+ * Collapses through the same last-write-wins fold the dialog uses, then leads
+ * with a judge summary (settled count, barrier state, exact next action) so a
+ * skimming session gets the verdict from the first two lines. Pure apart from
+ * the record reads; tested directly (see the wf_0435 replay test: 39 settled +
+ * 1 wedged must render 40 rows and a BARRIER HELD line, not 200 stale rows).
+ */
+export function renderRunStatus(
+  run: RunStatusInput,
+  getRecord: (recordId: string) => AgentRecord | undefined,
+  thresholdMs: number,
+  now = Date.now(),
+): string {
+  const { agents } = collapse(run.progress);
+  if (agents.length === 0) return `Run ${run.id} [${run.status}]: no agents yet.`;
+  const active = run.status === "running";
+  const stallOf = new Map<number, string>();
+  let lastProgress = 0;
+  for (const a of agents) {
+    if (typeof a.lastProgressAt === "number") lastProgress = Math.max(lastProgress, a.lastProgressAt);
+    const rec = a.recordId ? getRecord(a.recordId) : undefined;
+    const stall = rec ? describeStall(rec, now, thresholdMs) : undefined;
+    if (stall) stallOf.set(a.index, stall);
+  }
+  const open = agents.filter(a => isLive(a));
+  const done = agents.length - open.length;
+  const openStalled = open.filter(a => stallOf.has(a.index));
+  const openQueued = open.filter(a => displayState(a, active) === "queued");
+  const idleMs = lastProgress > 0 ? Math.max(0, now - lastProgress) : 0;
+  const head =
+    `Run ${run.id} [${run.status}] ${run.name} — ${done}/${agents.length} agents settled` +
+    (open.length === 0
+      ? " (all settled)"
+      : openStalled.length === open.length
+        ? ` · BARRIER HELD by ${open.length} stalled: ${open.map(a => `#${a.index}`).join(", ")} (no progress for ${formatStallAge(idleMs)})`
+        : ` · ${open.length} open (${openStalled.length} stalled` +
+          (openQueued.length > 0 ? `, ${openQueued.length} queued behind the run limit` : "") +
+          `), no progress for ${formatStallAge(idleMs)}`);
+  const advice =
+    open.length === 0
+      ? []
+      : openStalled.length > 0
+        ? [
+            `→ stop_agent ${openStalled.map(a => `#${a.index}`).join(" ")} to release the barrier (resolves null, siblings proceed), or retry_agent with a narrowed prompt.`,
+          ]
+        : [
+            `→ ${open.length} agents open but moving (last progress ${formatStallAge(idleMs)} ago); leave it or stop_run to settle.`,
+          ];
+  return (
+    [head, ...advice].join("\n") +
+    "\n" +
+    agents
+      .map(a => {
+        const stall = stallOf.get(a.index);
+        const bits = [`#${a.index} ${a.label}`, displayState(a, active)];
+        if (a.attempt !== undefined && a.attempt > 1) bits.push(`attempt ${a.attempt}`);
+        if (stall) bits.push(stall);
+        if (a.error) bits.push(`error: ${a.error.slice(0, 120)}`);
+        else if (a.resultPreview) bits.push(`output: ${a.resultPreview.slice(0, 120)}`);
+        return bits.join(" · ");
+      })
+      .join("\n")
+  );
 }
