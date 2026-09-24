@@ -1938,6 +1938,7 @@ export class AgentManager {
     if (record.stalledSince !== undefined) return;
     if (!isStalled(record, now, this.stallThresholdMs)) return;
     record.stalledSince = now;
+    record.stallEpisodes = (record.stallEpisodes ?? 0) + 1;
     try {
       this.onStall?.(record);
     } catch { /* ignore stall side-effect errors */ }

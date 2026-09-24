@@ -61,6 +61,12 @@ export interface WorkflowTask {
   /** How many agents came back from {@link replay} instead of being spawned. */
   replayedCount: number;
 
+  /**
+   * Throttle key of the last run-level stall check-in sent (see
+   * control.stallCheckinKey). Without it every sweep re-pages the same
+   * wedge; with it only a newly stalled child or a new episode re-notifies.
+   */
+  lastStallCheckinKey?: string;
   /** The append-only event log, in emission order. */
   workflowProgress: WorkflowEntry[];
   /** Bumped once per applied batch, so a renderer can tell nothing changed. */

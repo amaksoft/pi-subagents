@@ -278,3 +278,41 @@ export function partialOutputSuffix(record: AgentRecord): string {
   const partial = record.result?.trim();
   return partial ? `\n\nPartial output before the failure:\n${partial}` : "";
 }
+
+export interface StallCheckinLike {
+  alias?: string;
+  handle?: string;
+  id: string;
+  type: string;
+  stallEpisodes?: number;
+  lastActivityAt: number;
+  liveOutput?: string;
+  outputFile?: string;
+}
+
+/**
+ * The check-in nudge text for one flagged agent: episode count (so the third
+ * check-in reads as an escalation, not a first impression), total silence,
+ * the live tail as the build-vs-wedge evidence, and the judge's three moves.
+ * Deliberately does NOT point at get_subagent_result — that tool refuses
+ * running agents, so citing it at check-in time sends the judge to a wall.
+ * Pure; tested directly.
+ */
+export function buildStallCheckin(
+  record: StallCheckinLike,
+  diagnosis: string,
+  now = Date.now(),
+): string {
+  const who = `@${record.alias ?? record.handle ?? record.id} (${record.type})`;
+  const episode = record.stallEpisodes ?? 1;
+  const silence = formatStallAge(stallElapsedMs(record, now));
+  const tail = record.liveOutput?.trim();
+  const evidence = tail ? ` Tail: ${tail.slice(-500)}` : " No output yet — nothing to judge the work by.";
+  const recheck = `snooze_subagent ${record.id} <minutes> to recheck later`;
+  const kill = `stop_subagent ${record.id} to kill it`;
+  const transcript = record.outputFile ? ` Partial transcript: ${record.outputFile}.` : "";
+  return (
+    `Check-in #${episode} — ${who} ${diagnosis} (silent ${silence} total).${evidence} ` +
+    `Decision: let it run (${recheck}) or take action (${kill}).${transcript}`
+  );
+}

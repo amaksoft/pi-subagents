@@ -34,11 +34,11 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { renderAgentInspect, renderRunStatus, resolveWorkflowAgent } from "./workflow/control.js";
+import { renderAgentInspect, renderRunStatus, resolveWorkflowAgent, stallCheckinKey, stalledChildrenOf } from "./workflow/control.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, GRACE_TURNS_CEILING, loadSettings, MAX_CONCURRENT_CEILING, MAX_TURNS_CEILING, SUBAGENT_DEPTH_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
-import { describeStall, describeToolActivity, getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { buildStallCheckin, describeStall, describeToolActivity, getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
@@ -70,7 +70,7 @@ import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "
 import { createWorkflowHost } from "./workflow/host.js";
 import { appendJournal, readJournal, type WorkflowJournalEntry } from "./workflow/journal.js";
 import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/meta.js";
-import { collapse, elapsedMs } from "./workflow/progress.js";
+import { collapse, elapsedMs, isLive } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
 import { armWorkflowTimeout, completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveEvictedResume, resolveResumeTarget, selectSettledEvictions, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
@@ -495,6 +495,37 @@ export default function (pi: ExtensionAPI) {
     widget.update();
   }
 
+  // Run-level stall check-in for workflow children: the run is what the
+  // judge acts on, so one aggregated message per change (newly stalled
+  // child, or a new episode after a snooze lapse) — never one nudge per
+  // child per sweep. A settled run, or a run with nothing stalled, stays
+  // silent; the key also clears implicitly when the wedge resolves and a
+  // later wedge re-notifies as new.
+  function sendWorkflowStallCheckin(record: AgentRecord) {
+    const task = workflowTasks.get(record.workflowId ?? "");
+    if (!task || (task.status !== "running" && task.status !== "paused")) return;
+    const now = Date.now();
+    const threshold = manager.getStallThresholdMs();
+    const stalled = stalledChildrenOf(task.workflowProgress, id => manager.getRecord(id), threshold, now);
+    if (stalled.length === 0) return;
+    const key = stallCheckinKey(stalled);
+    if (task.lastStallCheckinKey === key) return;
+    task.lastStallCheckinKey = key;
+    const { agents } = collapse(task.workflowProgress);
+    const settled = agents.filter(a => !isLive(a)).length;
+    const runName = task.meta?.name ?? task.workflowName ?? task.id;
+    const lines = stalled.map(s => `#${s.index} ${s.label} — ${s.stall} (episode ${s.episodes})`);
+    pi.events.emit("subagents:stalled", buildEventData(record));
+    pi.sendMessage({
+      customType: "subagent-notification",
+      content:
+        `Check-in — run ${runName}: ${settled}/${agents.length} settled, BARRIER HELD by ${stalled.length}: ${lines.join("; ")}. ` +
+        `workflow_control inspect <#n> for the evidence brief, stop_agent to release the barrier, retry_agent with a narrowed prompt to restart one.`,
+      display: true,
+      details: undefined,
+    }, { deliverAs: "followUp", triggerTurn: true });
+  }
+
   // ---- Group join manager ----
   const groupJoin = new GroupJoinManager(
     (records, partial) => {
@@ -653,9 +684,16 @@ export default function (pi: ExtensionAPI) {
     if (!isTopLevelAgent(record)) return;
     pi.events.emit("subagents:stopped", buildEventData(record));
   }, (record) => {
-    // One stall nudge per silence episode — fired by the sweep the moment it
-    // flags the agent, re-armed by any later heartbeat. Nested/workflow
-    // children report through their owner, like every other lifecycle event.
+    // One stall check-in per silence episode — fired by the sweep the moment
+    // it flags the agent, re-armed by any later heartbeat, recurred by
+    // snooze lapse (snooze clears the flag, so still-silent re-flags).
+    // Workflow children check in through their run (aggregated, below), not
+    // here: the run is what the judge acts on. Nested children report
+    // through their parent, like every other lifecycle event.
+    if (record.workflowId !== undefined) {
+      sendWorkflowStallCheckin(record);
+      return;
+    }
     if (!isTopLevelAgent(record)) return;
     const diagnosis = describeStall(record, Date.now(), manager.getStallThresholdMs()) ?? "stalled";
     pi.events.emit("subagents:stalled", buildEventData(record));
@@ -664,11 +702,9 @@ export default function (pi: ExtensionAPI) {
     // would double-page every episode. abort() on a live running record
     // cannot fail, so skipping here never loses the signal.
     if (manager.isStallAutoAbort()) return;
-    const footer = record.outputFile ? `\nPartial transcript so far: ${record.outputFile}` : "";
     pi.sendMessage({
       customType: "subagent-notification",
-      content: `@${record.alias ?? record.handle ?? record.id} (${record.type}) ${diagnosis} — no tool output, no streamed text, no usage since. ` +
-        `stop_subagent ${record.id} if it is time-sensitive; get_subagent_result still reads what it produced.${footer}`,
+      content: buildStallCheckin(record, diagnosis),
       display: true,
       details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
     }, { deliverAs: "followUp", triggerTurn: true });

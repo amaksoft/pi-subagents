@@ -186,3 +186,38 @@ describe("renderAgentInspect (judge's brief)", () => {
     expect(out).toContain('{"isReal":true}');
   });
 });
+
+describe("stalledChildrenOf + stallCheckinKey (run-level check-in)", () => {
+  const rec = (episodes: number) =>
+    ({
+      status: "running",
+      lastActivityAt: NOW - 3 * HOUR,
+      currentTool: { name: "bash", startedAt: NOW - 3 * HOUR },
+      snoozedUntil: undefined,
+      stallEpisodes: episodes,
+    }) as any;
+
+  const progress = (): WorkflowEntry[] => [
+    { type: "workflow_agent", index: 0, label: "a", state: "start", agentId: "w0", recordId: "r0", queuedAt: NOW - 3 * HOUR, startedAt: NOW - 3 * HOUR, lastProgressAt: NOW - 3 * HOUR },
+    { type: "workflow_agent", index: 0, label: "a", state: "start", agentId: "w0", recordId: "r0", queuedAt: NOW - 3 * HOUR, startedAt: NOW - 3 * HOUR, lastProgressAt: NOW - 3 * HOUR },
+    { type: "workflow_agent", index: 1, label: "b", state: "done", agentId: "w1", resultPreview: "ok" },
+  ];
+
+  it("collapses history and joins live stalled records only", async () => {
+    const { stalledChildrenOf } = await import("../src/workflow/control.js");
+    const out = stalledChildrenOf(progress(), id => (id === "r0" ? rec(1) : undefined), 10 * 60_000, NOW);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ index: 0, label: "a", episodes: 1 });
+    expect(out[0].stall).toContain("bash");
+  });
+
+  it("key changes on new episodes, not on repeated sweeps", async () => {
+    const { stalledChildrenOf, stallCheckinKey } = await import("../src/workflow/control.js");
+    const get = (id: string) => (id === "r0" ? rec(1) : undefined);
+    const k1 = stallCheckinKey(stalledChildrenOf(progress(), get, 10 * 60_000, NOW));
+    const k2 = stallCheckinKey(stalledChildrenOf(progress(), get, 10 * 60_000, NOW + 60_000));
+    expect(k1).toBe(k2);
+    const k3 = stallCheckinKey(stalledChildrenOf(progress(), id => (id === "r0" ? rec(2) : undefined), 10 * 60_000, NOW));
+    expect(k3).not.toBe(k1);
+  });
+});

@@ -184,3 +184,43 @@ export function renderAgentInspect(
   if (record.liveOutput) lines.push(`live tail:\n${record.liveOutput.slice(-2000)}`);
   return lines.join("\n");
 }
+
+export interface StalledChild {
+  index: number;
+  label: string;
+  stall: string;
+  episodes: number;
+}
+
+/**
+ * Live stalled children of one run, for the run-level check-in. Collapsed
+ * (one row per index, like status) and joined against live manager records:
+ * a settled-and-swept child contributes nothing, a parked one was never
+ * stalled. Pure; the caller throttles notification by the returned key.
+ */
+export function stalledChildrenOf(
+  progress: readonly WorkflowEntry[],
+  getRecord: (recordId: string) => AgentRecord | undefined,
+  thresholdMs: number,
+  now = Date.now(),
+): StalledChild[] {
+  const { agents } = collapse(progress);
+  const out: StalledChild[] = [];
+  for (const a of agents) {
+    if (!isLive(a) || !a.recordId) continue;
+    const rec = getRecord(a.recordId);
+    const stall = rec ? describeStall(rec, now, thresholdMs) : undefined;
+    if (stall) out.push({ index: a.index, label: a.label, stall, episodes: rec?.stallEpisodes ?? 1 });
+  }
+  return out.sort((x, y) => x.index - y.index);
+}
+
+/**
+ * Throttle key for the run-level check-in: the stalled set plus each
+ * member's episode count. A newly wedged child changes the set; a re-flag
+ * after a snooze bumps an episode — either re-notifies, anything else stays
+ * silent. Opaque to callers; stored per run by the host.
+ */
+export function stallCheckinKey(stalled: readonly StalledChild[]): string {
+  return stalled.map(s => `${s.index}e${s.episodes}`).join(",");
+}

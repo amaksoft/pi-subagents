@@ -336,3 +336,37 @@ describe("getStatusNote timeout cause", () => {
     expect(getStatusNote("completed", 600_000)).toBe("");
   });
 });
+
+describe("buildStallCheckin", () => {
+  it("names the episode, the silence, the tail, and the judge's moves", async () => {
+    const { buildStallCheckin } = await import("../src/status-note.js");
+    const out = buildStallCheckin(
+      {
+        alias: "build",
+        id: "a1",
+        type: "Explore",
+        stallEpisodes: 3,
+        lastActivityAt: Date.now() - 45 * 60_000,
+        liveOutput: "$ make -j16\n[  42%] Building CXX object foo.o\n",
+      },
+      "stalled 45m in bash",
+    );
+    expect(out).toContain("Check-in #3");
+    expect(out).toContain("@build (Explore)");
+    expect(out).toContain("stalled 45m in bash");
+    expect(out).toContain("Building CXX object");
+    expect(out).toContain("snooze_subagent a1 <minutes>");
+    expect(out).toContain("stop_subagent a1");
+    expect(out).not.toContain("get_subagent_result");
+  });
+
+  it("admits having nothing when there is no output yet", async () => {
+    const { buildStallCheckin } = await import("../src/status-note.js");
+    const out = buildStallCheckin(
+      { id: "a2", type: "Plan", lastActivityAt: Date.now() - 60_000 },
+      "stalled",
+    );
+    expect(out).toContain("Check-in #1");
+    expect(out).toContain("No output yet");
+  });
+});

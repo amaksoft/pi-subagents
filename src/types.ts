@@ -230,6 +230,14 @@ export interface AgentRecord {
    * so a slow-but-alive agent is never misreported as terminal.
    */
   stalledSince?: number;
+  /**
+   * Lifetime stall-flag count, incremented by the sweep on every flag.
+   * Never reset: heartbeats clear stalledSince (re-arming the next episode)
+   * but the count answers "how many times have I been asked about this one",
+   * which is what turns the Nth check-in from a first impression into an
+   * escalation. Read with `?? 0` — records predate the field.
+   */
+  stallEpisodes?: number;
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;

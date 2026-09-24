@@ -3052,6 +3052,24 @@ describe("AgentManager stall sweep (proactive nudge)", () => {
     expect(seen).toHaveLength(2);
   });
 
+  it("counts episodes across re-flags (lifetime, never reset by heartbeat)", () => {
+    const { id, record } = silentRecord();
+    (manager as any).onStall = () => {};
+    manager.sweepStall(id, record);
+    expect(record.stallEpisodes).toBe(1);
+    // Snooze-lapse re-flag (what the judge's 'recheck in 20m' becomes).
+    record.stalledSince = undefined;
+    record.lastActivityAt = Date.now() - 1000;
+    manager.sweepStall(id, record);
+    expect(record.stallEpisodes).toBe(2);
+    // Genuine activity does not rewrite history: the next wedge continues
+    // the count, because the silence duration (not the number) describes it.
+    touchActivity(record);
+    record.lastActivityAt = Date.now() - 1000;
+    manager.sweepStall(id, record);
+    expect(record.stallEpisodes).toBe(3);
+  });
+
   it("never flags settled records", () => {
     const { id, record } = silentRecord();
     record.status = "completed";
