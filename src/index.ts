@@ -3024,6 +3024,13 @@ Terse command-style prompts produce shallow, generic work.
         if (record.liveOutput?.trim()) {
           output += `\n\nLive tool output (last lines):\n${record.liveOutput.trim()}`;
         }
+        // Teammate mail the judge (or a sibling) sent: unread count plus the
+        // latest, so a check-in can ask "did it see my message" and get an
+        // answer instead of guessing from silence.
+        if (record.inbox?.length) {
+          const latest = record.inbox[record.inbox.length - 1];
+          output += `\n\nUnread teammate mail: ${record.inbox.length}. Latest from ${latest.from}: ${latest.text.slice(0, 300)}`;
+        }
       } else if (record.status === "error") {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
       } else {
@@ -3106,6 +3113,42 @@ Terse command-style prompts produce shallow, generic work.
       } catch (err) {
         return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
       }
+    },
+  }));
+
+  // ---- message_teammate tool ----
+
+  // Main-session closure: the main session sends as "main session". Sibling
+  // agents send through their own closure (see agent-runner teammateMailbox).
+  // Same ownership as stop/steer: top-level running/queued agents only.
+  registerToolReportingUsage(defineTool({
+    name: SUBAGENT_TOOL_NAMES.MESSAGE,
+    label: "Message Teammate",
+    description:
+      "Send a message to a running top-level agent (your teammate). " +
+      "Delivered into their conversation after their current tool execution, stamped as from you, and kept in their inbox. " +
+      "Use it to hand off findings or coordinate — lighter than steer_subagent (which redirects), and sibling agents can reply the same way. " +
+      "Nested children and workflow agents are unreachable: message their parent, or use the run's controls.",
+    promptSnippet: "Send a message to a teammate agent",
+    parameters: Type.Object({
+      target: Type.String({
+        description: "Teammate handle, alias, or agent id. Siblings only — nested children and workflow agents are unreachable.",
+      }),
+      message: Type.String({
+        description: "The message. Attributed to you (main session) on delivery.",
+      }),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      const record = resolveAgentRef(params.target);
+      if (!record || !isTopLevelAgent(record)) {
+        return textResult(`Teammate not found: "${params.target}". Messageable: ${manager.listTeammates().map(r => r.handle ?? r.alias ?? r.id).join(", ") || "(none)"}.`);
+      }
+      const delivery = manager.deliverTeammateMessage("main session", record.id, params.message);
+      return textResult(
+        delivery.ok
+          ? `Message delivered to ${record.handle ?? record.alias ?? record.id}. It arrives after their current tool execution.`
+          : (delivery.reason ?? `Could not deliver to ${record.id}.`),
+      );
     },
   }));
 

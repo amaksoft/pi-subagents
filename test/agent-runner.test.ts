@@ -2927,3 +2927,45 @@ describe("background interactive strip", () => {
     expect(lastToolsPassed()).toContain("AskUserQuestion");
   });
 });
+
+describe("teammate mailbox wiring", () => {
+  function baseMocks() {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    const cfg = makeAgentConfig({ extensions: true });
+    vi.mocked(getAgentConfig).mockReset();
+    vi.mocked(getAgentConfig).mockImplementation(() => cfg);
+    vi.mocked(getToolNamesForType).mockReset();
+    vi.mocked(getToolNamesForType).mockImplementation(() => BUILTINS_7);
+    return () => {
+      vi.mocked(getAgentConfig).mockReset();
+      vi.mocked(getToolNamesForType).mockReset();
+    };
+  }
+
+  it("top-level runs get message_teammate as a custom tool", async () => {
+    const restore = baseMocks();
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    try {
+      await runAgent(ctx, "Explore", "go", {
+        pi,
+        teammateMailbox: { manager: {} as any, senderLabel: "@scout", selfId: "a1" },
+      });
+    } finally {
+      restore();
+    }
+    expect(customToolNames()).toContain("message_teammate");
+  });
+
+  it("runs without a mailbox get no teammate tool", async () => {
+    const restore = baseMocks();
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    try {
+      await runAgent(ctx, "Explore", "go", { pi });
+    } finally {
+      restore();
+    }
+    expect(customToolNames()).not.toContain("message_teammate");
+  });
+});

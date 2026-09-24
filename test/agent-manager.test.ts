@@ -3672,3 +3672,63 @@ describe("per-agent run timeout", () => {
     expect(record.status).toBe("running");
   });
 });
+
+describe("AgentManager teammate delivery", () => {
+  let manager: AgentManager;
+  function liveRecord() {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise(() => {});
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "mate", isBackground: true });
+    return { id, record: manager.getRecord(id)! };
+  }
+
+  it("inbox-appends with the envelope and steers the live session", () => {
+    const { id, record } = liveRecord();
+    record.session = { steer: vi.fn(async () => {}) } as any;
+    const res = manager.deliverTeammateMessage("@scout", id, "found it");
+    expect(res).toEqual({ ok: true });
+    expect(record.inbox).toEqual([{ from: "@scout", text: "found it", at: expect.any(Number) }]);
+    expect(record.session.steer).toHaveBeenCalledWith("[teammate mail from @scout]: found it");
+    manager.dispose();
+  });
+
+  it("queues into pendingSteers before the session exists", () => {
+    const { id, record } = liveRecord();
+    record.session = undefined;
+    const res = manager.deliverTeammateMessage("@scout", id, "early");
+    expect(res).toEqual({ ok: true });
+    expect(record.pendingSteers).toEqual(["[teammate mail from @scout]: early"]);
+    manager.dispose();
+  });
+
+  it("bounds the inbox, oldest drops first", () => {
+    const { id, record } = liveRecord();
+    for (let i = 0; i < 25; i++) manager.deliverTeammateMessage("@x", id, `m${i}`);
+    expect(record.inbox).toHaveLength(20);
+    expect(record.inbox![0].text).toBe("m5");
+    expect(record.inbox![19].text).toBe("m24");
+    manager.dispose();
+  });
+
+  it("refuses unknown, settled, nested, and empty", () => {
+    const { id, record } = liveRecord();
+    expect(manager.deliverTeammateMessage("@x", "nope", "hi").ok).toBe(false);
+    expect(manager.deliverTeammateMessage("@x", id, "   ").ok).toBe(false);
+    record.status = "completed";
+    expect(manager.deliverTeammateMessage("@x", id, "hi").reason).toContain("not running");
+    record.status = "running";
+    record.parentAgentId = "p1";
+    expect(manager.deliverTeammateMessage("@x", id, "hi").reason).toContain("not a top-level agent");
+    manager.dispose();
+  });
+
+  it("lists only top-level records as teammates", () => {
+    const { id } = liveRecord();
+    const mates = manager.listTeammates().map(r => r.id);
+    expect(mates).toContain(id);
+    manager.dispose();
+  });
+});

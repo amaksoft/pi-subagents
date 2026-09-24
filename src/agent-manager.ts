@@ -33,6 +33,7 @@ import {
   resolvePool,
 } from "./domain/queue.js";
 import { DEFAULT_STALL_THRESHOLD_MS, isStalled, isStoppableStatus, pushLiveOutput, touchActivity, touchOutput, trackToolActivity } from "./status-note.js";
+import { TEAMMATE_INBOX_CAP, type TeammateManager } from "./teammate-tools.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
@@ -857,6 +858,18 @@ export class AgentManager {
       nested: options.parentAgentId !== undefined,
       workflow: options.workflowId !== undefined,
       background: record.isBackground === true,
+      // Implicit session team: top-level agents are teammates (mailbox +
+      // message_teammate tool). Nested/workflow children are excluded —
+      // ownership boundary, same as stop/steer.
+      ...(!(options.parentAgentId !== undefined || options.workflowId !== undefined)
+        ? {
+            teammateMailbox: {
+              manager: this,
+              senderLabel: `@${record.alias ?? record.handle ?? record.id}`,
+              selfId: record.id,
+            },
+          }
+        : {}),
       // Worktree wins for the working dir (the agent must run in the copy —
       // which, with a custom cwd, was created from that target). Config stays
       // with the parent project when a caller-supplied cwd is in play; it must
@@ -1608,6 +1621,50 @@ export class AgentManager {
       });
 
     record.promise = promise;
+  }
+
+  /**
+   * Deliver teammate mail (see teammate-tools.ts): inbox append (bounded) +
+   * delivery through the steer channel with a sender envelope. Top-level
+   * running/queued agents only — nested children belong to their parent,
+   * workflow children to their run. Fire-and-forget like steer: mailbox
+   * write is the guarantee (Claude Code's SendMessage reports sent only on
+   * successful mailbox write), the steer is best-effort aliveness.
+   */
+  deliverTeammateMessage(
+    fromLabel: string,
+    toId: string,
+    text: string,
+  ): { ok: boolean; reason?: string } {
+    const record = this.agents.get(toId);
+    if (!record) return { ok: false, reason: `Teammate not found: "${toId}". It may have finished or been cleaned up.` };
+    if (!isTopLevelAgent(record)) {
+      return {
+        ok: false,
+        reason: `Agent "${toId}" is not a top-level agent. Only the agent that spawned it can reach it — message the owning parent instead (stopping the parent stops all its children).`,
+      };
+    }
+    if (record.status !== "running" && record.status !== "queued") {
+      return { ok: false, reason: `Agent "${toId}" is not running (status: ${record.status}). Mail needs a live reader.` };
+    }
+    const trimmed = text.trim();
+    if (!trimmed) return { ok: false, reason: "Empty message — nothing to deliver." };
+    record.inbox ??= [];
+    record.inbox.push({ from: fromLabel, text: trimmed, at: Date.now() });
+    while (record.inbox.length > TEAMMATE_INBOX_CAP) record.inbox.shift();
+    const envelope = `[teammate mail from ${fromLabel}]: ${trimmed}`;
+    if (record.session) {
+      record.session.steer(envelope).catch(() => {});
+    } else {
+      if (!record.pendingSteers) record.pendingSteers = [];
+      record.pendingSteers.push(envelope);
+    }
+    return { ok: true };
+  }
+
+  /** Top-level records: the implicit session team (see teammate-tools.ts). */
+  listTeammates(): AgentRecord[] {
+    return [...this.agents.values()].filter(isTopLevelAgent);
   }
 
   /**

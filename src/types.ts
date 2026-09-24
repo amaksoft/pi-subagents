@@ -225,6 +225,12 @@ export interface AgentRecord {
    */
   liveOutput?: string;
   /**
+   * Teammate mail (see teammate-tools.ts): {from, text, at}, oldest drops
+   * past TEAMMATE_INBOX_CAP. Delivery also steers the envelope into the
+   * live conversation; the inbox is the history steer messages don't keep.
+   */
+  inbox?: { from: string; text: string; at: number }[];
+  /**
    * When the stall sweep last flagged this agent. Set by the periodic sweep,
    * cleared by any subsequent activity. Display-only — status is untouched,
    * so a slow-but-alive agent is never misreported as terminal.

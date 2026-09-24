@@ -24,6 +24,7 @@ import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
+import { createTeammateTools, type TeammateManager } from "./teammate-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
@@ -45,6 +46,7 @@ export const SUBAGENT_TOOL_NAMES = {
   STOP: "stop_subagent",
   SNOOZE: "snooze_subagent",
   WORKFLOW_CONTROL: "workflow_control",
+  MESSAGE: "message_teammate",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -530,6 +532,12 @@ export interface RunOptions {
    * present to answer. See BACKGROUND_STRIPPED_TOOLS.
    */
   background?: boolean;
+  /**
+   * Teammate mailbox for this run (top-level spawns only): the child gets a
+   * `message_teammate` tool bound to this manager with its own label as the
+   * sender. Nested/workflow children are not teammates — ownership boundary.
+   */
+  teammateMailbox?: { manager: TeammateManager; senderLabel: string; selfId: string };
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
   /**
@@ -1004,8 +1012,20 @@ export async function runAgent(
   // agent's own frontmatter can take back, while StructuredOutput exists only
   // because this call asked for a schema — removing it would make the request
   // unsatisfiable by construction rather than merely restricted.
+  // Teammate mail for top-level runs: the session team is implicit (every
+  // top-level agent), so the tool ships by default and `disallowed_tools` is
+  // the only opt-out — same precedence as nested delegation tools.
+  const teammateTools = options.teammateMailbox
+    ? createTeammateTools({
+        manager: options.teammateMailbox.manager,
+        senderLabel: options.teammateMailbox.senderLabel,
+        selfId: options.teammateMailbox.selfId,
+      })
+    : [];
+  const teammateToolNames = new Set(teammateTools.map(tool => tool.name));
   const readmitToolNames = new Set([
     ...[...nestedToolNames].filter(name => !disallowedSet?.has(name)),
+    ...[...teammateToolNames].filter(name => !disallowedSet?.has(name)),
     ...structuredToolNames,
   ]);
 
@@ -1062,6 +1082,7 @@ export async function runAgent(
         (t) => !EXCLUDED_TOOL_NAMES.includes(t) && !disallowedSet?.has(t),
       ),
       ...[...nestedToolNames].filter((t) => !disallowedSet?.has(t)),
+      ...[...teammateToolNames].filter((t) => !disallowedSet?.has(t)),
       // Not filtered through `disallowedSet`, unlike the nested tools above:
       // the caller asked for a schema, and removing the only tool that can
       // satisfy it would make the request unsatisfiable by construction rather
@@ -1072,7 +1093,7 @@ export async function runAgent(
     // Deny the orchestration tools EXCEPT the nested ones this agent opted into —
     // those are injected as customTools and must survive the registry gate.
     const denyTools = new Set<string>(
-      EXCLUDED_TOOL_NAMES.filter((t) => !nestedToolNames.has(t)),
+      EXCLUDED_TOOL_NAMES.filter((t) => !nestedToolNames.has(t) && !teammateToolNames.has(t)),
     );
     // Keep only the built-ins the agent asked for — deny the rest.
     for (const name of BUILTIN_TOOL_NAMES) {
@@ -1136,7 +1157,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
-    customTools: [...nestedTools, ...structuredTools],
+    customTools: [...nestedTools, ...teammateTools, ...structuredTools],
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {
