@@ -51,6 +51,22 @@ export const SUBAGENT_TOOL_NAMES = {
 const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 
 /**
+ * Interactive host tools a background agent must never see. A background run
+ * has no user to answer a question, approve a plan, or leave one — calling
+ * any of these wedges the agent until a stall check-in (or a human) notices.
+ * Names verified against the pi 0.86 bundle (AskUserQuestion/EnterPlanMode/
+ * ExitPlanMode all exist there); best-effort by nature — a future interactive
+ * tool we cannot name today is not covered. Foreground agents keep them;
+ * explicit requests do not re-admit them (deny wins, loudly — see the warn
+ * at the strip site), because honoring the request would build the wedge.
+ */
+export const BACKGROUND_STRIPPED_TOOLS: string[] = [
+  "AskUserQuestion",
+  "EnterPlanMode",
+  "ExitPlanMode",
+];
+
+/**
  * Canonical name of an extension for `extensions: [...]` allowlist matching.
  * Lowercased — extension names match case-insensitively so `extensions: [Mcp]`
  * resolves the same as `[mcp]`. Tool names within `ext:foo/bar` are not affected.
@@ -248,16 +264,47 @@ export function installExtensionToolScope(
      * seeded from `toolNames`.
      */
     readmitToolNames: Set<string>;
+    /**
+     * Strip interactive host tools (see BACKGROUND_STRIPPED_TOOLS). True for
+     * background runs, which have no user to answer — a background agent
+     * calling AskUserQuestion wedges until a check-in notices.
+     */
+    stripInteractive?: boolean;
+    /** Warn-once flag storage for the strip below (owns the Set). */
+    stripWarned?: Set<string>;
+    /** Agent label for the strip warning (handle/alias/description). */
+    agentLabel?: string;
+    /** Built-in names the agent EXPLICITLY requested (frontmatter `tools:`). */
+    explicitBuiltins?: Set<string>;
   },
 ): void {
   const { loader, toolNames, disallowedSet, extNames, narrowing, readmitToolNames } = ctx;
+  const strip = ctx.stripInteractive === true ? new Set(BACKGROUND_STRIPPED_TOOLS) : undefined;
+  const warned = ctx.stripWarned ?? new Set<string>();
+  ctx.stripWarned = warned;
+  // Warns only when the strip bites an EXPLICIT request (frontmatter `tools:`
+  // or an `ext:` narrowing naming it). Default-scope names vanish silently —
+  // defaults never promised them, and warning per spawn would page every
+  // background run for a decision nobody made.
+  const stripName = (agentLabel: string, name: string, explicit: boolean): boolean => {
+    if (strip?.has(name) !== true) return false;
+    if (explicit && !warned.has(name)) {
+      warned.add(name);
+      console.warn(`[pi-subagents] background agent "${agentLabel}" asked for interactive tool "${name}" — stripped (no user to answer; calling it would wedge the run).`);
+    }
+    return true;
+  };
+  const agentLabel = ctx.agentLabel ?? "(unnamed)";
+  const explicitBuiltins = ctx.explicitBuiltins ?? new Set<string>();
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
   // extension not named by a selector contributes nothing (its handlers still ran),
   // and `ext:foo/bar` narrows `foo` to just `bar`.
   const inScope = (): Set<string> => {
-    const keep = new Set(toolNames.filter((t) => !disallowedSet?.has(t)));
+    const keep = new Set(
+      toolNames.filter((t) => !disallowedSet?.has(t) && !stripName(agentLabel, t, explicitBuiltins.has(t))),
+    );
     const optInActive = extNames.size > 0;
     for (const extension of loader.getExtensions().extensions) {
       const canons = extensionCanonicalNames(extension.path);
@@ -268,6 +315,7 @@ export function installExtensionToolScope(
       for (const name of extension.tools.keys()) {
         if (narrowed && !narrowed.has(name)) continue;
         if (disallowedSet?.has(name)) continue;
+        if (stripName(agentLabel, name, narrowed?.has(name) ?? false)) continue;
         keep.add(name);
       }
     }
@@ -476,6 +524,12 @@ export interface RunOptions {
    * "this is how you return your answer" instructions is worse than one.
    */
   workflow?: boolean;
+  /**
+   * True for background runs: interactive host tools (AskUserQuestion,
+   * plan-mode entry) are stripped at every scoping gate, since no user is
+   * present to answer. See BACKGROUND_STRIPPED_TOOLS.
+   */
+  background?: boolean;
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
   /**
@@ -984,12 +1038,26 @@ export async function runAgent(
   // async can appear there, and a hard registry gate is the correct boundary.
   const builtinToolNameSet = new Set(toolNames);
 
+  // Background interactive strip, static branches (see inScope for the live
+  // one): a background run has no user to answer, so these names leave the
+  // session construction entirely. Warns on explicit requests; deny wins.
+  const backgroundStrip = options.background === true ? new Set(BACKGROUND_STRIPPED_TOOLS) : undefined;
+  const stripStatic = (names: string[]): string[] => {
+    if (!backgroundStrip) return names;
+    return names.filter(n => {
+      if (!backgroundStrip.has(n)) return true;
+      if (agentConfig?.builtinToolNames?.includes(n)) {
+        console.warn(`[pi-subagents] background agent "${type}" asked for interactive tool "${n}" — stripped (no user to answer; calling it would wedge the run).`);
+      }
+      return false;
+    });
+  };
   let sessionTools: string[] | undefined;
   let sessionExcludeTools: string[] | undefined;
   if (noExtensions) {
     // Strict allowlist: built-ins the agent asked for, plus any opt-in nested
     // tools (whose names would otherwise be dropped as EXCLUDED_TOOL_NAMES).
-    sessionTools = [
+    sessionTools = stripStatic([
       ...toolNames.filter(
         (t) => !EXCLUDED_TOOL_NAMES.includes(t) && !disallowedSet?.has(t),
       ),
@@ -999,7 +1067,7 @@ export async function runAgent(
       // satisfy it would make the request unsatisfiable by construction rather
       // than merely restricted.
       ...structuredToolNames,
-    ];
+    ]);
   } else {
     // Deny the orchestration tools EXCEPT the nested ones this agent opted into —
     // those are injected as customTools and must survive the registry gate.
@@ -1014,6 +1082,11 @@ export async function runAgent(
       // disallowed_tools wins even over an opt-in nested tool of the same name.
       // Not over StructuredOutput, though — see the allowlist branch above.
       for (const name of disallowedSet) {
+        if (!structuredToolNames.has(name)) denyTools.add(name);
+      }
+    }
+    if (backgroundStrip) {
+      for (const name of backgroundStrip) {
         if (!structuredToolNames.has(name)) denyTools.add(name);
       }
     }
@@ -1112,6 +1185,9 @@ export async function runAgent(
       extNames,
       narrowing,
       readmitToolNames,
+      stripInteractive: options.background === true,
+      agentLabel: options.description ?? options.alias ?? options.handle ?? type,
+      explicitBuiltins: new Set(agentConfig?.builtinToolNames ?? []),
     });
   }
 

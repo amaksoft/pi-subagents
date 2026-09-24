@@ -2815,3 +2815,115 @@ describe("resolveDefaultModel", () => {
     expect(resolveDefaultModel(undefined, registry([haiku]), undefined)).toBeUndefined();
   });
 });
+
+describe("background interactive strip", () => {
+  const INTERACTIVE = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"];
+
+  // Replace (not queue): earlier tests' unconsumed `Once` entries would
+  // otherwise shift ours. Restored after each test via the saved default.
+  const defaultAgentConfigImpl = vi.mocked(getAgentConfig).getMockImplementation();
+  const defaultToolNamesImpl = vi.mocked(getToolNamesForType).getMockImplementation();
+  const loudConfig = () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    const cfg = makeAgentConfig({ extensions: false, builtinToolNames: [...BUILTINS_7, "AskUserQuestion"] });
+    // mockReset first: earlier tests' unconsumed `Once` entries take
+    // precedence over implementations and would silently substitute stale
+    // values into this run.
+    vi.mocked(getAgentConfig).mockReset();
+    vi.mocked(getAgentConfig).mockImplementation(() => cfg);
+    vi.mocked(getToolNamesForType).mockReset();
+    vi.mocked(getToolNamesForType).mockImplementation(() => [...BUILTINS_7, "AskUserQuestion"]);
+    return () => {
+      vi.mocked(getAgentConfig).mockImplementation(defaultAgentConfigImpl!);
+      vi.mocked(getToolNamesForType).mockImplementation(defaultToolNamesImpl!);
+    };
+  };
+
+  it("strips explicitly requested interactive tools under the static allowlist, loudly", async () => {
+    const restore = loudConfig();
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      await runAgent(ctx, "Explore", "go", { pi, isolated: true, background: true });
+      expect(lastToolsPassed()).not.toContain("AskUserQuestion");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("AskUserQuestion"));
+    } finally {
+      warn.mockRestore();
+      restore();
+    }
+  });
+
+  it("keeps them for foreground runs (a user is present to answer)", async () => {
+    const restore = loudConfig();
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    try {
+      await runAgent(ctx, "Explore", "go", { pi, isolated: true });
+    } finally {
+      restore();
+    }
+
+    expect(lastToolsPassed()).toContain("AskUserQuestion");
+  });
+
+  it("leaves the registry gate alone for foreground runs", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    const cfg = makeAgentConfig({ extensions: true });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(cfg).mockReturnValueOnce(cfg);
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const opts = createAgentSession.mock.calls[0][0];
+    for (const name of INTERACTIVE) expect(opts.excludeTools ?? []).not.toContain(name);
+  });
+
+  it("denies them at the registry gate under extensions when background", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    const cfg = makeAgentConfig({ extensions: true });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(cfg).mockReturnValueOnce(cfg);
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, background: true });
+
+    const opts = createAgentSession.mock.calls[0][0];
+    for (const name of INTERACTIVE) expect(opts.excludeTools ?? []).toContain(name);
+  });
+
+  it("strips a host-registered interactive tool from the live active set when background", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    withExtensions({ "/ext/host.ts": ["AskUserQuestion"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, background: true });
+
+    // Renarrow runs at install (no turn_end fired): the strip applies live,
+    // and beforeToolCall blocks it on turn 1 too.
+    expect(lastToolsPassed()).not.toContain("AskUserQuestion");
+    const blocked = await session.agent.beforeToolCall?.({ toolCall: { name: "AskUserQuestion" } }, undefined);
+    expect(blocked).toMatchObject({ block: true });
+  });
+
+  it("leaves the same host tool alone for foreground runs", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    withExtensions({ "/ext/host.ts": ["AskUserQuestion"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(lastToolsPassed()).toContain("AskUserQuestion");
+  });
+});
