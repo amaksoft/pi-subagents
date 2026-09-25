@@ -656,7 +656,10 @@ export class FleetList {
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const cost = this.showCost() ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
     const activity = describeFleetActivity(record, Date.now(), this.getStallThresholdMs());
-    const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}${activity ? ` · ${activity}` : ""}`;
+    // Effective model (short label; absent until the session reports it) —
+    // the row answers "what is it running on" without opening the viewer.
+    const model = record.invocation?.modelName ? ` · ${record.invocation.modelName}` : "";
+    const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}${model}${activity ? ` · ${activity}` : ""}`;
     const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
     return rightAlign(left, right, width);
   }

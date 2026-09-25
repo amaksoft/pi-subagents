@@ -3587,7 +3587,8 @@ Terse command-style prompts produce shallow, generic work.
     const record = await selectItem(ctx.ui, "Running agents", agents, a => {
       const dn = getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      const model = a.invocation?.modelName ? ` · ${a.invocation.modelName}` : "";
+      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status}${model} · ${dur}`;
     });
     if (!record) return;
 

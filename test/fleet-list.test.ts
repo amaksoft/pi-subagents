@@ -1034,3 +1034,31 @@ describe("FleetList snoozed rows", () => {
     expect(rows).toContain("snoozed 8m left");
   });
 });
+
+describe("FleetList model display", () => {
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+
+  function rowText(record: AgentRecord): string {
+    const fleet = new FleetList(fakeManager([record]), new Map(), () => false);
+    let factory: any;
+    fleet.setUICtx({
+      setWidget: (_k: string, c: any) => { factory = c; },
+      onTerminalInput: () => () => {},
+      getEditorText: () => "",
+      notify: () => {},
+      custom: (() => new Promise(() => {})) as any,
+    } as any);
+    fleet.update();
+    return factory({ requestRender: () => {}, terminal: { columns: 120, rows: 40 } }, theme).render(120).join("\n");
+  }
+
+  it("shows the effective model when the session reported one", () => {
+    const out = rowText(makeRecord({ invocation: { modelName: "haiku 4.5" } }));
+    expect(out).toContain("haiku 4.5");
+  });
+
+  it("shows no model segment before the session reports", () => {
+    const out = rowText(makeRecord({ invocation: undefined }));
+    expect(out).not.toContain("haiku");
+  });
+});
