@@ -231,6 +231,13 @@ export interface AgentRecord {
    */
   inbox?: { from: string; text: string; at: number }[];
   /**
+   * Follow subscription (follow_agent): text/tool deltas accumulate here
+   * and flush to the main session every FOLLOW_FLUSH_MS via onFollowOutput
+   * — the model-side equivalent of attaching to a transcript. Bounded;
+   * cleared on settle/unfollow/dispose so no timer outlives its run.
+   */
+  follow?: { buffer: string; timer?: ReturnType<typeof setInterval> };
+  /**
    * When the stall sweep last flagged this agent. Set by the periodic sweep,
    * cleared by any subsequent activity. Display-only — status is untouched,
    * so a slow-but-alive agent is never misreported as terminal.

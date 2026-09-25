@@ -709,6 +709,16 @@ export default function (pi: ExtensionAPI) {
       display: true,
       details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
     }, { deliverAs: "followUp", triggerTurn: true });
+  }, (record, text) => {
+    // Follow-stream chunk: appended, never turn-stealing. The judge watches;
+    // the run is never interrupted. Top-level only (follow() enforces).
+    if (!isTopLevelAgent(record)) return;
+    pi.sendMessage({
+      customType: "subagent-notification",
+      content: `[follow @${record.alias ?? record.handle ?? record.id} (${record.type})]: ${text}`,
+      display: true,
+      details: undefined,
+    }, { deliverAs: "followUp", triggerTurn: false });
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -3195,6 +3205,48 @@ Terse command-style prompts produce shallow, generic work.
       // previous conversation's tasks after a switch.
       const store = manager.teamTasksFor(ctx.cwd, ctx.sessionManager?.getSessionId?.());
       return runTeamTasksAction(store, TEAM_LEAD_LABEL, params as TeamTasksParams);
+    },
+  }));
+
+  // ---- follow_agent tool ----
+
+  // Model-side attach: stream a running agent's output inline without
+  // interrupting it. Observation belongs to the judge — teammates coordinate
+  // through mail and tasks, so children never receive this tool.
+  registerToolReportingUsage(defineTool({
+    name: SUBAGENT_TOOL_NAMES.FOLLOW,
+    label: "Follow Agent",
+    description:
+      "Stream a running agent's text and tool output into this conversation as it happens (5s batches, no turn taken, run never interrupted). " +
+      "For watching a long build or judging working-vs-wedged live — use inspect for a one-shot evidence brief instead. " +
+      "Ends automatically when the run settles. Top-level agents only.",
+    promptSnippet: "Follow a running agent's live output",
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "The agent ID to follow (must be currently running). The agent's handle works too.",
+      }),
+      unfollow: Type.Optional(Type.Boolean({
+        description: "Set true to stop following. Settle also ends it automatically.",
+      })),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      if (params.unfollow) {
+        return textResult(
+          manager.unfollow(params.agent_id)
+            ? `Stopped following ${params.agent_id}.`
+            : `Was not following ${params.agent_id}.`,
+        );
+      }
+      const record = resolveAgentRef(params.agent_id);
+      if (!record || !isTopLevelAgent(record)) {
+        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      }
+      const res = manager.follow(record.id);
+      return textResult(
+        res.ok
+          ? `Following ${record.handle ?? record.alias ?? record.id} — output streams here in batches until it settles.`
+          : (res.reason ?? `Could not follow ${record.id}.`),
+      );
     },
   }));
 

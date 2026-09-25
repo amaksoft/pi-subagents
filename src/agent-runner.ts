@@ -49,6 +49,7 @@ export const SUBAGENT_TOOL_NAMES = {
   WORKFLOW_CONTROL: "workflow_control",
   MESSAGE: "message_teammate",
   TEAM_TASKS: "team_tasks",
+  FOLLOW: "follow_agent",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */

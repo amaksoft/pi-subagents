@@ -3732,3 +3732,71 @@ describe("AgentManager teammate delivery", () => {
     manager.dispose();
   });
 });
+
+describe("AgentManager follow mode", () => {
+  let manager: AgentManager;
+  const chunks: { id: string; text: string }[] = [];
+
+  function followedRecord() {
+    chunks.length = 0;
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, undefined, undefined, (record, text) => {
+      chunks.push({ id: record.id, text });
+    });
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise(() => {});
+      return { responseText: "", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "watched", isBackground: true });
+    return { id, record: manager.getRecord(id)! };
+  }
+
+  it("buffers deltas and flushes on the cadence", () => {
+    vi.useFakeTimers();
+    try {
+      const { id, record } = followedRecord();
+      expect(manager.follow(id)).toEqual({ ok: true });
+      manager.bufferFollow(record, "hello ");
+      manager.bufferFollow(record, "world");
+      expect(chunks).toHaveLength(0);
+      vi.advanceTimersByTime(5000);
+      expect(chunks).toEqual([{ id, text: "hello world" }]);
+      // Empty buffer flushes nothing.
+      vi.advanceTimersByTime(5000);
+      expect(chunks).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+      manager.dispose?.();
+    }
+    manager.dispose?.();
+  });
+
+  it("bounds the buffer and ends with a final flush on settle", () => {
+    vi.useFakeTimers();
+    try {
+      const { id, record } = followedRecord();
+      manager.follow(id);
+      manager.bufferFollow(record, "x".repeat(5000));
+      expect(record.follow!.buffer).toHaveLength(4000);
+      // Simulate settle tail: finalize via unfollow (same path as settleRun).
+      manager.unfollow(id);
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0].text).toHaveLength(4000);
+      expect(record.follow).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      manager.dispose?.();
+    }
+  });
+
+  it("refuses unknown, settled, and nested agents", () => {
+    const { id, record } = followedRecord();
+    expect(manager.follow("nope").ok).toBe(false);
+    record.status = "completed";
+    expect(manager.follow(id).reason).toContain("not running");
+    record.status = "running";
+    record.parentAgentId = "p1";
+    expect(manager.follow(id).reason).toContain("not a top-level agent");
+    expect(manager.unfollow(id)).toBe(false);
+    manager.dispose?.();
+  });
+});

@@ -46,6 +46,12 @@ export type OnAgentStart = (record: AgentRecord) => void;
 export type OnAgentStop = (record: AgentRecord) => void;
 /** Fired once per stall episode, when the sweep first flags a silent agent. */
 export type OnAgentStall = (record: AgentRecord) => void;
+/** Follow-stream chunk for one agent (see record.follow). */
+export type OnFollowOutput = (record: AgentRecord, text: string) => void;
+/** Flush cadence for follow buffers. */
+export const FOLLOW_FLUSH_MS = 5000;
+/** Follow buffer bound — stream excerpt, not transcript. */
+export const FOLLOW_BUFFER_CHARS = 4000;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
 /**
  * Fired once per assistant `message_end`, for EVERY agent this manager owns —
@@ -381,6 +387,7 @@ export class AgentManager {
   private onStart?: OnAgentStart;
   private onStop?: OnAgentStop;
   private onStall?: OnAgentStall;
+  private onFollowOutput?: OnFollowOutput;
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
   /**
@@ -435,6 +442,7 @@ export class AgentManager {
     onUsage?: OnAgentUsage,
     onStop?: OnAgentStop,
     onStall?: OnAgentStall,
+    onFollowOutput?: OnFollowOutput,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
@@ -442,6 +450,7 @@ export class AgentManager {
     this.onUsage = onUsage;
     this.onStop = onStop;
     this.onStall = onStall;
+    this.onFollowOutput = onFollowOutput;
     this.poolLedger = emptyLedger(maxConcurrent, DEFAULT_MAX_CONCURRENT_FOREGROUND);
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
@@ -906,6 +915,7 @@ export class AgentManager {
         // Articulation also ends a reasoning stretch.
         record.reasoningSince = undefined;
         touchOutput(record);
+        this.bufferFollow(record, delta);
         options.onTextDelta?.(delta, fullText);
       },
       onToolOutput: (delta) => {
@@ -913,6 +923,7 @@ export class AgentManager {
         // a heartbeat — a build streaming output never flags.
         pushLiveOutput(record, delta);
         touchOutput(record);
+        this.bufferFollow(record, delta);
       },
       onThinkingActivity: (phase) => {
         // Reasoning deltas prove work through a stretch with no tool calls
@@ -1133,6 +1144,8 @@ export class AgentManager {
    *   the release disagree with the acquire.
    */
   private settleRun(record: AgentRecord, guardCallback: boolean, pool: Pool | undefined): void {
+    // Follow ends with a final flush: the last chunk arrives with the run.
+    this.finalizeFollow(record, true);
     if (!record.isBackground) record.resultConsumed = true;
     // Budget over: disarm first so a timer firing mid-settle cannot re-abort.
     this.disarmRunTimeout(record);
@@ -1581,6 +1594,7 @@ export class AgentManager {
       onToolOutput: (delta) => {
         pushLiveOutput(record, delta);
         touchOutput(record);
+        this.bufferFollow(record, delta);
       },
       onThinkingActivity: (phase) => {
         // Reasoning deltas prove work through a stretch with no tool calls
@@ -1680,6 +1694,69 @@ export class AgentManager {
   /** Top-level records: the implicit session team (see teammate-tools.ts). */
   listTeammates(): AgentRecord[] {
     return [...this.agents.values()].filter(isTopLevelAgent);
+  }
+
+  /**
+   * Subscribe to an agent's live output (follow_agent): text/tool deltas
+   * buffer and flush every FOLLOW_FLUSH_MS. Top-level running/queued only —
+   * following is observation, and observation belongs to the judge (main
+   * session), not to siblings or runs. Settle/unfollow/dispose ends it with
+   * a final flush.
+   */
+  follow(id: string): { ok: boolean; reason?: string } {
+    const record = this.agents.get(id);
+    if (!record) return { ok: false, reason: `Agent not found: "${id}". It may have been cleaned up.` };
+    if (!isTopLevelAgent(record)) {
+      return { ok: false, reason: `Agent "${id}" is not a top-level agent. Follow its owning parent instead.` };
+    }
+    if (record.status !== "running" && record.status !== "queued") {
+      return { ok: false, reason: `Agent "${id}" is not running (status: ${record.status}). Nothing to follow — use get_subagent_result.` };
+    }
+    if (record.follow) return { ok: true };
+    record.follow = { buffer: "" };
+    record.follow.timer = setInterval(() => this.flushFollow(record), FOLLOW_FLUSH_MS);
+    // Unref so a forgotten subscription never holds the process open; the
+    // timer dies with the run regardless (settle/unfollow/dispose).
+    (record.follow.timer as unknown as { unref?: () => void }).unref?.();
+    return { ok: true };
+  }
+
+  /** End a follow subscription, flushing whatever buffered. */
+  unfollow(id: string): boolean {
+    const record = this.agents.get(id);
+    if (!record?.follow) return false;
+    this.finalizeFollow(record, true);
+    return true;
+  }
+
+  /** Append a stream delta to the follow buffer (bounded). No-op unfollowed. */
+  bufferFollow(record: AgentRecord, text: string): void {
+    if (!record.follow || !text) return;
+    record.follow.buffer += text;
+    if (record.follow.buffer.length > FOLLOW_BUFFER_CHARS) {
+      record.follow.buffer = record.follow.buffer.slice(-FOLLOW_BUFFER_CHARS);
+    }
+  }
+
+  /** Flush one buffer through the callback. Timer-safe: missing callback drops. */
+  private flushFollow(record: AgentRecord): void {
+    const chunk = record.follow?.buffer.trim();
+    if (record.follow) record.follow.buffer = "";
+    if (!chunk) return;
+    try {
+      this.onFollowOutput?.(record, chunk);
+    } catch { /* follow must never break the run it watches */ }
+  }
+
+  /**
+   * End a subscription: clear the timer, optionally flush the remainder.
+   * Called on settle (flush), unfollow (flush), dispose (drop).
+   */
+  private finalizeFollow(record: AgentRecord, flush: boolean): void {
+    if (!record.follow) return;
+    if (record.follow.timer !== undefined) clearInterval(record.follow.timer);
+    if (flush) this.flushFollow(record);
+    record.follow = undefined;
   }
 
   /**
@@ -2129,6 +2206,9 @@ export class AgentManager {
    */
   async dispose(pi?: ExtensionAPI): Promise<void> {
     clearInterval(this.cleanupInterval);
+    // Follow timers die with the manager (drop, don't flush — the session
+    // receiving them is going away too).
+    for (const record of this.agents.values()) this.finalizeFollow(record, false);
     // Clear queue — via dequeue, so anyone blocked in spawnAndWait is woken
     // rather than left awaiting a gate nothing will ever resolve.
     this.dequeue(() => true);
