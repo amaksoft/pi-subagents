@@ -1062,3 +1062,73 @@ describe("FleetList model display", () => {
     expect(out).not.toContain("haiku");
   });
 });
+
+describe("FleetList needs-you-first ranking", () => {
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+  const NOW = Date.now();
+
+  function listText(records: AgentRecord[], runs: any[]): string {
+    const fleet = new FleetList(fakeManager(records), new Map(), () => false);
+    fleet.setWorkflowSource(() => runs, async () => {});
+    let factory: any;
+    fleet.setUICtx({
+      setWidget: (_k: string, c: any) => { factory = c; },
+      onTerminalInput: () => () => {},
+      getEditorText: () => "",
+      notify: () => {},
+      custom: (() => new Promise(() => {})) as any,
+    } as any);
+    fleet.update();
+    return factory({ requestRender: () => {}, terminal: { columns: 120, rows: 40 } }, theme).render(120).join("\n");
+  }
+
+  const run = (over: Record<string, unknown> = {}) => ({
+    id: "wf_1",
+    name: "held-run",
+    status: "running",
+    doneCount: 39,
+    totalCount: 40,
+    startedAt: NOW - 1000,
+    tokens: 0,
+    ...over,
+  });
+
+  it("a barrier-held run outranks an older working agent", () => {
+    const working = makeRecord({
+      id: "w",
+      description: "working agent",
+      status: "running",
+      startedAt: NOW - 3600_000,
+      lastActivityAt: NOW,
+    });
+    const out = listText([working], [run({ stalledCount: 1 })]);
+    expect(out.indexOf("held-run")).toBeLessThan(out.indexOf("working agent"));
+  });
+
+  it("a stalled agent outranks a working run, finished lingers last", () => {
+    const wedged = makeRecord({
+      id: "s",
+      description: "wedged agent",
+      status: "running",
+      startedAt: NOW - 2000,
+      lastActivityAt: NOW - 3600_000,
+    });
+    const done = makeRecord({
+      id: "d",
+      description: "done agent",
+      status: "completed",
+      startedAt: NOW - 5000,
+      completedAt: NOW - 1000,
+      session: FAKE_SESSION as any,
+    });
+    const out = listText([wedged, done], [run({ name: "busy-run", stalledCount: 0, startedAt: NOW - 3000 })]);
+    const iw = out.indexOf("wedged agent");
+    const ib = out.indexOf("busy-run");
+    const id = out.indexOf("done agent");
+    expect(iw).toBeGreaterThan(-1);
+    expect(ib).toBeGreaterThan(-1);
+    expect(id).toBeGreaterThan(-1);
+    expect(iw).toBeLessThan(ib);
+    expect(ib).toBeLessThan(id);
+  });
+});

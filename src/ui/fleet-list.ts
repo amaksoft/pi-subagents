@@ -15,7 +15,7 @@
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
-import { DEFAULT_STALL_THRESHOLD_MS, describeStall, isStoppableStatus } from "../status-note.js";
+import { DEFAULT_STALL_THRESHOLD_MS, describeStall, isStalled, isStoppableStatus } from "../status-note.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
@@ -341,16 +341,41 @@ export class FleetList {
   }
 
   /**
-   * Runs sit above the agents rather than interleaved by start time: a run owns
-   * most of the agents under it, so listing the container first is what makes
-   * the list read as a hierarchy rather than a shuffle.
+   * One list, needs-you-first: stalled agents and barrier-held runs above
+   * working ones, lingered-finished last — urgency beats start time and
+   * hierarchy, because the list's job is answering "what needs me", not
+   * "what started first". The main row stays pinned at the top as the
+   * anchor. Ties break by start time so a settled sort never shuffles.
    */
   private roster(): FleetEntry[] {
-    return [
-      { kind: "main" },
+    type Row = WorkflowEntry | AgentEntry;
+    const rest: Row[] = [
       ...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })),
       ...this.agentRecords().map(record => ({ kind: "agent" as const, record })),
     ];
+    const startedAt = (e: Row): number =>
+      e.kind === "workflow" ? e.workflow.startedAt : e.record.startedAt;
+    rest.sort((a, b) => this.rank(a) - this.rank(b) || startedAt(a) - startedAt(b));
+    return [{ kind: "main" }, ...rest];
+  }
+
+  /**
+   * Attention rank: 0 needs a decision (stalled agent, run with stalled
+   * children), 1 working, 2 lingered-finished. Queued-but-never-stalled
+   * agents are working (their silence is waiting); snoozed agents are
+   * working too — the judge asked for quiet, so quiet must not page.
+   */
+  private rank(entry: FleetEntry): number {
+    if (entry.kind === "main") return -1;
+    if (entry.kind === "workflow") {
+      if (entry.workflow.status === "running" || entry.workflow.status === "paused") {
+        return (entry.workflow.stalledCount ?? 0) > 0 ? 0 : 1;
+      }
+      return 2;
+    }
+    const record = entry.record;
+    if (!isStoppableStatus(record.status)) return 2;
+    return isStalled(record, Date.now(), this.getStallThresholdMs()) ? 0 : 1;
   }
 
   private clampSelection(): void {
@@ -581,9 +606,16 @@ export class FleetList {
     // The `x stop` affordance itself only shows while some row is stoppable.
     const armed = this.stopArmedFor != null && this.stoppableRecord(rosterList.find(e => e.kind === "agent" && e.record.id === this.stopArmedFor)) !== undefined;
     const anyStoppable = rosterList.some(e => this.stoppableRecord(e) !== undefined);
+    // Discoverability: an idle list with judgebles says so — the count is
+    // what pulls the user in before a wedge ages, same job as the check-in
+    // nudge for the model.
+    const needsYou = rosterList.some(e => e.kind !== "main" && this.rank(e) === 0)
+      ? rosterList.filter(e => e.kind !== "main" && this.rank(e) === 0).length
+      : 0;
     const hint = this.active
       ? "↑↓ select · enter view · " + (armed ? theme.fg("error", "x again to STOP") + theme.fg("dim", " · esc back") : theme.fg("dim", (anyStoppable ? "x stop · " : "") + "esc back"))
-      : theme.fg("dim", "esc to interrupt · ← for agents · ↓ to manage");
+      : theme.fg("dim", "esc to interrupt · ← for agents · ↓ to manage") +
+        (needsYou > 0 ? theme.fg("accent", ` · ${needsYou} need${needsYou === 1 ? "s" : ""} you`) : "");
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + hint, width));
     lines.push("");
