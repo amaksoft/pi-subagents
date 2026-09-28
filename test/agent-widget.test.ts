@@ -526,3 +526,23 @@ describe("AgentWidget overflow accounting", () => {
     expect(render()).toContain("resumed description");
   });
 });
+
+describe("previewResult", () => {
+  it("skips JSON husk to the first meaningful line", async () => {
+    const { previewResult } = await import("../src/index.js");
+    expect(previewResult('{\n  "verdict": "real",\n  "reason": "confirmed"\n}')).toBe('"verdict": "real", / "reason": "confirmed"');
+  });
+
+  it("passes plain prose through, bounded", async () => {
+    const { previewResult } = await import("../src/index.js");
+    expect(previewResult("Done: all green.")).toBe("Done: all green.");
+    const long = previewResult("word ".repeat(100));
+    expect(long.length).toBeLessThanOrEqual(160);
+  });
+
+  it("falls back to the raw first line when everything is husk", async () => {
+    const { previewResult } = await import("../src/index.js");
+    expect(previewResult("{\n}\n")).toBe("{");
+    expect(previewResult("")).toBe("");
+  });
+});

@@ -86,6 +86,29 @@ function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
 }
 
+/**
+ * Collapsed notification preview: the first ~160 chars that actually say
+ * something. Skips leading structural husk — a workflow result serialized
+ * as JSON opens with `{`, and the old first-line preview rendered exactly
+ * that (a 388k-token run summarized as `⎿ {`). Blank lines and lines
+ * containing only JSON punctuation never carry meaning, so they don't
+ * spend the budget. Exported for tests.
+ */
+export function previewResult(text: string, maxChars = 160): string {
+  const HUSK = /^[\s\[{\]},:]*$/;
+  let out = "";
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || HUSK.test(line)) continue;
+    const sep = out ? " / " : "";
+    const room = maxChars - out.length - sep.length;
+    if (room <= 0) break;
+    out += line.length > room ? sep + line.slice(0, room) : sep + line;
+    if (line.length > room || out.length >= maxChars) break;
+  }
+  return out || text.split("\n")[0]?.slice(0, maxChars) || "";
+}
+
 export function renderRunningAgentStatus(
   frame: string,
   statsText: string,
@@ -344,8 +367,7 @@ export default function (pi: ExtensionAPI) {
           const lines = d.resultPreview.split("\n").slice(0, 30);
           for (const l of lines) line += "\n" + theme.fg("dim", `  ${l}`);
         } else {
-          const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
-          line += "\n  " + theme.fg("dim", `⎿  ${preview}`);
+          line += "\n  " + theme.fg("dim", `⎿  ${previewResult(d.resultPreview)}`);
         }
 
         // Line 4: output file link (if present)
