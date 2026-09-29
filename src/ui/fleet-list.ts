@@ -7,7 +7,7 @@
  * confirm) stops the selected agent, Esc returns to the prompt.
  * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
  *
- * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
+ * Mechanics (see plan): the list is an `aboveEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
  * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
  */
@@ -277,7 +277,12 @@ export class FleetList {
           render: (w: number) => this.renderBar(w, theme),
           invalidate: () => { this.widgetRegistered = false; this.tui = undefined; },
         };
-      }, { placement: "belowEditor" });
+      // aboveEditor renders between the last message and the prompt input —
+      // the visual bottom of the scroll, where new output lands. The host
+      // offers no scroll-pinned slot (widgets are editor-relative only), so
+      // this is the closest available: the list reads as the tail of the
+      // conversation, not an appendix under the prompt.
+      }, { placement: "aboveEditor" });
       this.widgetRegistered = true;
     } else {
       this.tui?.requestRender();
