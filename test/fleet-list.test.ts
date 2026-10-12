@@ -184,6 +184,16 @@ describe("formatFleetElapsed", () => {
     expect(formatFleetElapsed(11_000)).toBe("11s");
     expect(formatFleetElapsed(11_400)).toBe("11s");
     expect(formatFleetElapsed(11_600)).toBe("12s");
+    expect(formatFleetElapsed(59_500)).toBe("1m00s");
+  });
+  it("switches to minutes past a minute", () => {
+    expect(formatFleetElapsed(72_000)).toBe("1m12s");
+    expect(formatFleetElapsed(65_000)).toBe("1m05s");
+  });
+  it("switches to hours past an hour (unbounded, no days)", () => {
+    expect(formatFleetElapsed(3_600_000)).toBe("1h00m00s");
+    expect(formatFleetElapsed(7_384_000)).toBe("2h03m04s");
+    expect(formatFleetElapsed(90_000_000)).toBe("25h00m00s");
   });
   it("floors negatives to 0s", () => {
     expect(formatFleetElapsed(-500)).toBe("0s");

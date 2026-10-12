@@ -340,7 +340,9 @@ describe("formatDuration", () => {
     [340, "340ms"],
     [9000, "9s"],
     [72_000, "1m12s"],
-    [3_600_000, "60m00s"],
+    [3_600_000, "1h00m00s"],
+    [7_384_000, "2h03m04s"],
+    [90_000_000, "25h00m00s"],
   ])("formats %ims as %s", (ms, expected) => {
     expect(formatDuration(ms)).toBe(expected);
   });

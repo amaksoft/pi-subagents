@@ -75,9 +75,16 @@ type AgentEntry = { kind: "agent"; record: AgentRecord };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
 type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
 
-/** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
+/** Adaptive elapsed: `11s` under a minute, `1m12s` under an hour, `2h03m04s` beyond (hours unbounded, no days). Integer seconds throughout (matches Claude Code, unlike formatMs). */
 export function formatFleetElapsed(ms: number): string {
-  return `${Math.max(0, Math.round(ms / 1000))}s`;
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (totalSeconds < 3600) return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return `${hours}h${restMinutes.toString().padStart(2, "0")}m${seconds.toString().padStart(2, "0")}s`;
 }
 
 /** `▸ bash 3m` — current tool plus time-in-tool, for running agent rows. */

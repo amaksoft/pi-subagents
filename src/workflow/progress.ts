@@ -369,14 +369,17 @@ export function elapsedMs(
 
 const plural = (n: number, word: string) => (n === 1 ? word : `${word}s`);
 
-/** `1m12s` / `9s` / `340ms`, matching how the rest of the extension reads. */
+/** `2h03m04s` / `1m12s` / `9s` / `340ms`, matching how the rest of the extension reads (hours unbounded, no days). */
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
   const totalSeconds = Math.round(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   if (minutes === 0) return `${seconds}s`;
-  return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
+  if (totalSeconds < 3600) return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return `${hours}h${restMinutes.toString().padStart(2, "0")}m${seconds.toString().padStart(2, "0")}s`;
 }
 
 export interface WorkflowHeader {
